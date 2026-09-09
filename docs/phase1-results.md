@@ -114,3 +114,28 @@ detector keeps watching through its own mute and can therefore detect the ad *en
 MediaProjection lifecycle on Android 16: screen-off, process restart, reboot. This matters more now
 than it did in Phase 0, because Phase 2 expects days of unattended recording and the consent token
 is single-use.
+
+## Desktop stream recording (added after Phase 1)
+
+Recording the same broadcast on the laptop lets data accumulate overnight instead of requiring the
+phone be carried around, and it avoids the projection-consent and battery questions entirely. Two
+things were measured before trusting it.
+
+**ffmpeg quits early on this live stream, intermittently.** One run stopped after 44 s of a
+requested 300 s and still exited with status 0 — nothing errored, ffmpeg simply decided the live
+playlist had ended. The `-reconnect` options do not cover that, since there is no error to recover
+from. `tools/record_stream.sh` therefore runs each segment as its own ffmpeg invocation under a
+supervisor loop, so an early exit costs the tail of one segment rather than the night, and reports
+how many segments came back short.
+
+**Consecutive segments overlap by about 8 seconds**, measured with `trainer/skew_test.py`'s
+alignment (scores 0.995–0.999, so this is certain rather than inferred). Each restart resumes from
+the stream's live edge, which lags real time by the buffer depth, so the new segment re-delivers
+audio the previous one already had. At 30-minute segments that is under 0.5 % duplication, but
+identical audio appearing in both a training and a test split would inflate results, so ingest
+should trim each segment's head against the previous segment's tail.
+
+**Still unmeasured: whether desktop and phone audio are interchangeable.** They carry the same
+broadcast but by different routes. Until `trainer/skew_test.py` has been run on a genuinely
+simultaneous pair, desktop recordings should not be assumed valid as training data for a model that
+will run on the phone.
