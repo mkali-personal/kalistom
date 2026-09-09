@@ -135,7 +135,28 @@ audio the previous one already had. At 30-minute segments that is under 0.5 % du
 identical audio appearing in both a training and a test split would inflate results, so ingest
 should trim each segment's head against the previous segment's tail.
 
-**Still unmeasured: whether desktop and phone audio are interchangeable.** They carry the same
-broadcast but by different routes. Until `trainer/skew_test.py` has been run on a genuinely
-simultaneous pair, desktop recordings should not be assumed valid as training data for a model that
-will run on the phone.
+**Desktop and phone audio are interchangeable — measured, not assumed.** A phone session and a
+desktop segment covering the same five minutes of broadcast were aligned (envelope correlation
+0.998, offset 347.5 s, refined to 1.2 ms) and compared on identical content:
+
+| Band | Phone | Desktop | Diff |
+|---|---|---|---|
+| 0–300 Hz | 64.3 % | 64.3 % | +0.0 |
+| 300–1000 Hz | 27.1 % | 27.1 % | +0.0 |
+| 1000–3400 Hz | 8.0 % | 8.0 % | +0.0 |
+| 3400–6000 Hz | 0.5 % | 0.5 % | −0.0 |
+| 6000–8000 Hz | 0.0 % | 0.0 % | −0.0 |
+
+Waveform correlation after alignment: **r = 0.9986**. The phone app and ffmpeg are receiving the
+same rendition, so what reaches YAMNet is the same signal either way. Desktop recordings are valid
+training data for a model that will run on the phone.
+
+This retracts an earlier suspicion. A first comparison suggested the phone carried far more energy
+above 3.4 kHz (3.3 % against 0.7 %), but those were recordings of different moments — talk versus
+music — and on identical content the difference vanishes entirely.
+
+**Remaining difference: where the embeddings are computed.** The audio matches, but embeddings
+generated on the laptop would come from a different TFLite runtime than the phone's. The clean fix
+is an offline mode in the app that reads a WAV and emits the same three-file session it would have
+produced live, so desktop recordings are processed by the exact code path that will run in
+production. That also makes every past recording reprocessable if the model or hop size changes.
