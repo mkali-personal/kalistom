@@ -249,9 +249,12 @@ def main() -> int:
         print(f"no session directory: {d}")
         return 1
 
-    names = sorted({p.stem for p in d.glob("sess_*.wav")})
+    names = sorted({p.stem for p in d.glob("*.wav")
+                    if (d / f"{p.stem}.f16").exists()})
     if not names:
-        print(f"no sessions in {d}")
+        print(f"no verifiable sessions in {d}
+"
+              "(a session is a .wav with a matching .f16 beside it)")
         return 1
 
     print(f"{len(names)} session(s) in {d}\n")

@@ -160,3 +160,34 @@ generated on the laptop would come from a different TFLite runtime than the phon
 is an offline mode in the app that reads a WAV and emits the same three-file session it would have
 produced live, so desktop recordings are processed by the exact code path that will run in
 production. That also makes every past recording reprocessable if the model or hop size changes.
+
+## Offline processing on the phone (proven equivalent to live recording)
+
+Laptop audio matches phone audio (r = 0.9986), but embeddings computed on the laptop would come
+from a different TFLite runtime. So the app gained an offline mode: WAVs are copied to an inbox on
+the device, processed through the phone's own YAMNet, and only the `.f16` and `.jsonl` come back,
+named after the input. Ingest pairs them with the laptop's copy of the audio — which means the
+verifier's rms check also proves the phone processed exactly the file we think it did.
+
+To rule out any drift between the two paths, the framing logic was extracted into a single
+`FrameEmitter` used by both live capture and offline processing. It was then tested by feeding the
+phone two WAVs it had recorded itself and comparing the result against the embeddings it produced
+at the time:
+
+| Session | Frames | Live bytes | Offline bytes | Result |
+|---|---|---|---|---|
+| `sess_20260909_232448` | 119 | 243,712 | 243,712 | **byte-identical** |
+| `sess_20260909_232603` | 85 | 174,080 | 174,080 | **byte-identical** |
+
+So offline processing is not merely close to live recording, it is the same computation. The same
+test also confirms the `FrameEmitter` refactor left the recorder's behaviour unchanged.
+
+Two consequences worth keeping in mind. Any recording ever made can be reprocessed if the model or
+the hop size changes, rather than being wasted. And the laptop never needs a TFLite runtime
+installed, which is convenient, since it does not have one.
+
+### Delay between the two sources
+
+The laptop stream lags the phone app by about **347 seconds** — nearly six minutes. This is why
+`trainer/skew_test.py` aligns before it compares; a naive comparison of the two on wall-clock time
+would show almost no correlation and imply, wrongly, that they carry different audio.

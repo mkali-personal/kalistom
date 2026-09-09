@@ -60,6 +60,9 @@ class MainActivity : Activity() {
         root.addView(button("Attenuation vs capture test (75s)") {
             send(RecorderService.ACTION_ATTEN_TEST)
         })
+        root.addView(button("Process inbox (desktop recordings)") {
+            send(RecorderService.ACTION_PROCESS_INBOX)
+        })
 
         logView = TextView(this).apply {
             textSize = 11f

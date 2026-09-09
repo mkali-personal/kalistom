@@ -46,6 +46,7 @@ class RecorderService : Service() {
         const val ACTION_STOP = "com.adsfilter.STOP"
         const val ACTION_MARK = "com.adsfilter.MARK"
         const val ACTION_ATTEN_TEST = "com.adsfilter.ATTEN_TEST"
+        const val ACTION_PROCESS_INBOX = "com.adsfilter.PROCESS_INBOX"
 
         /** Seconds per stage of the attenuation A/B test. */
         private const val ATTEN_STAGE_SEC = 15L
@@ -84,6 +85,7 @@ class RecorderService : Service() {
     @Volatile private var stopping = false
     private val markQueue = ConcurrentLinkedQueue<String>()
     @Volatile private var attenTestRunning = false
+    @Volatile private var offlineRunning = false
 
     private lateinit var audioManager: AudioManager
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -95,6 +97,7 @@ class RecorderService : Service() {
             ACTION_STOP -> { stopAll(); return START_NOT_STICKY }
             ACTION_MARK -> { markQueue.add("user"); return START_STICKY }
             ACTION_ATTEN_TEST -> { startAttenuationTest(); return START_STICKY }
+            ACTION_PROCESS_INBOX -> { startInboxProcessing(); return START_STICKY }
         }
         if (isRunning) return START_STICKY
 
@@ -189,16 +192,18 @@ class RecorderService : Service() {
         enforceStorageBudget(sessionsDir)
 
         val readBuf = ShortArray(Yamnet.HOP)          // read in exact hop-sized chunks
-        // WINDOW is not a multiple of HOP, so the analysis buffer must hold more than one window
-        // and advance by exactly HOP per frame. Getting this wrong desynchronises the embeddings
-        // from the WAV without any visible symptom.
-        val buf = FloatArray(Yamnet.WINDOW + 2 * Yamnet.HOP)
-        val window = FloatArray(Yamnet.WINDOW)
-        var fill = 0                                  // valid samples currently in `buf`
-        var frameIndex = 0L
         var lastActiveMs = System.currentTimeMillis()
         var lastNotifMs = 0L
         var topLine = ""
+
+        // Framing lives in FrameEmitter so live capture and offline processing of desktop files
+        // cannot drift apart - see FrameEmitter's docs.
+        val emitter = FrameEmitter(net) { index, embedding, rms, topIdx, topScore ->
+            session?.writeFrame(index, embedding, rms, topIdx, topScore)
+            if (net.classNames.isNotEmpty()) {
+                topLine = net.classNames.getOrElse(topIdx[0]) { "?" }
+            }
+        }
 
         while (!stopping) {
             var got = 0
@@ -221,13 +226,11 @@ class RecorderService : Service() {
             // --- session lifecycle -------------------------------------------------
             if (session == null && playing) {
                 session = SessionWriter(sessionsDir, Yamnet.EMBEDDING_DIM)
-                frameIndex = 0
-                fill = 0
+                emitter.reset()
                 log("session start: ${session!!.name}")
             } else if (session != null && !playing && now - lastActiveMs > IDLE_CLOSE_MS) {
                 closeSession()
-                frameIndex = 0
-                fill = 0
+                emitter.reset()
                 enforceStorageBudget(sessionsDir)
             }
 
@@ -248,34 +251,11 @@ class RecorderService : Service() {
 
             s.writeAudio(readBuf, got)
 
-            // --- framing -----------------------------------------------------------
-            // Append this read, then emit every frame the buffer now completes. Frame k always
-            // covers absolute samples [k*HOP, k*HOP + WINDOW) of the WAV.
-            for (i in 0 until got) {
-                buf[fill + i] = readBuf[i] / 32768.0f
-            }
-            fill += got
-
-            while (fill >= Yamnet.WINDOW) {
-                System.arraycopy(buf, 0, window, 0, Yamnet.WINDOW)
-                // rms MUST describe this frame's own window, not the chunk we happened to read
-                // last - the desktop verifier recomputes it from the WAV and compares, which is
-                // what proves audio and embeddings are aligned.
-                val frameRms = rmsDbfs(window)
-                try {
-                    val r = net.run(window)
-                    val top = topK(r.scores, 3)
-                    s.writeFrame(frameIndex, r.embedding, frameRms, top.first, top.second)
-                    frameIndex++
-                    if (net.classNames.isNotEmpty()) {
-                        topLine = net.classNames.getOrElse(top.first[0]) { "?" }
-                    }
-                } catch (t: Throwable) {
-                    log("ERROR inference: ${t.javaClass.simpleName}: ${t.message}")
-                    Log.e(TAG, "inference failed", t)
-                }
-                System.arraycopy(buf, Yamnet.HOP, buf, 0, fill - Yamnet.HOP)
-                fill -= Yamnet.HOP
+            try {
+                emitter.push(readBuf, got)
+            } catch (t: Throwable) {
+                log("ERROR inference: ${t.javaClass.simpleName}: ${t.message}")
+                Log.e(TAG, "inference failed", t)
             }
 
             if (now - lastNotifMs > 2000) {
@@ -346,6 +326,53 @@ class RecorderService : Service() {
         }, "atten-test").start()
     }
 
+    /** Runs YAMNet over WAV files copied into the inbox (recorded on the laptop). */
+    private fun startInboxProcessing() {
+        if (offlineRunning) { log("already processing the inbox"); return }
+
+        // Load the model on demand: processing files needs no MediaProjection, so requiring a
+        // recording to have been started first would be a pointless hoop.
+        val net = yamnet ?: try {
+            Yamnet(this).also { if (!isRunning) yamnet = it }
+        } catch (t: Throwable) {
+            log("could not load the model: ${t.javaClass.simpleName}: ${t.message}")
+            return
+        }
+
+        // Go foreground as a data-sync service so a long run is not killed. If a recording is
+        // already running the service is foreground as mediaProjection and we leave that alone.
+        if (!isRunning) {
+            createChannel()
+            val type = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q)
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC else 0
+            try {
+                startForeground(NOTIF_ID, buildNotification("processing inbox..."), type)
+            } catch (t: Throwable) {
+                log("could not go foreground: ${t.message}")
+            }
+        }
+        offlineRunning = true
+        Thread({
+            try {
+                val results = OfflineProcessor.processAll(this, net, deleteAfter = true) { log(it) }
+                val ok = results.count { it.error == null }
+                val secs = results.filter { it.error == null }.sumOf { it.seconds }
+                log("inbox done: $ok/${results.size} file(s), ${"%.1f".format(Locale.US, secs / 60)} min")
+                log("pull with: tools/process_desktop.sh pull")
+            } catch (t: Throwable) {
+                log("inbox processing error: ${t.javaClass.simpleName}: ${t.message}")
+                Log.e(TAG, "inbox failed", t)
+            } finally {
+                offlineRunning = false
+                if (!isRunning) {
+                    stopForeground(STOP_FOREGROUND_REMOVE)
+                    yamnet?.close(); yamnet = null
+                    stopSelf()
+                }
+            }
+        }, "offline-processor").start()
+    }
+
     private fun closeSession() {
         val s = session ?: return
         session = null
@@ -381,15 +408,6 @@ class RecorderService : Service() {
         }
     }
 
-    /** RMS of a normalised float window, in dBFS. */
-    private fun rmsDbfs(w: FloatArray): Float {
-        var sum = 0.0
-        for (v in w) sum += v.toDouble() * v.toDouble()
-        val rms = sqrt(sum / w.size)
-        return if (rms <= 0.0) -120f
-        else (20.0 * log10(rms)).coerceAtLeast(-120.0).toFloat()
-    }
-
     private fun rmsDbfs(buf: ShortArray, n: Int): Float {
         var sum = 0.0
         for (i in 0 until n) {
@@ -399,23 +417,6 @@ class RecorderService : Service() {
         val rms = sqrt(sum / n)
         return if (rms <= 0.0) -120f
         else (20.0 * log10(rms / 32768.0)).coerceAtLeast(-120.0).toFloat()
-    }
-
-    private fun topK(scores: FloatArray, k: Int): Pair<IntArray, FloatArray> {
-        val idx = IntArray(k)
-        val sc = FloatArray(k)
-        for (r in 0 until k) {
-            var best = -1
-            var bestV = Float.NEGATIVE_INFINITY
-            for (i in scores.indices) {
-                if (scores[i] > bestV && (0 until r).none { idx[it] == i }) {
-                    best = i; bestV = scores[i]
-                }
-            }
-            idx[r] = best.coerceAtLeast(0)
-            sc[r] = if (best >= 0) scores[best] else 0f
-        }
-        return idx to sc
     }
 
     private fun stopAll() {
