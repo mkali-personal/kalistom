@@ -30,8 +30,8 @@ Two findings that changed the design:
   which displaces `setStreamVolume` as the planned actuator.
 - **Capture is independent of the media volume** - measured flat to +0.07 dB with the slider at 0.
   So you can record training data with the phone silent, and the detector keeps seeing audio while
-  it mutes. Whether the session-0 effect also sits after the capture tap is **untested and must be
-  checked before building on it** - see `docs/phase1-results.md`.
+  it mutes. The session-0 effect was tested the same way and also leaves capture intact (-0.4 dB
+  against -0.2..-0.7 dB control drift), so the app-agnostic actuator is confirmed viable.
 
 ## Recording a session
 

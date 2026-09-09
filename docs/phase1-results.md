@@ -49,13 +49,41 @@ near −120 dBFS. `AudioPlaybackCapture` reads **before** the stream-volume stag
    would have been fed silence and could never detect the ad *ending*: it would mute once and stay
    stuck until a timeout. That failure mode is now ruled out for the volume path.
 
-### Open, and important for Phase 4
+### Session-0 attenuation was tested too — it also sits after the capture tap
 
-Whether a **session-0 `AudioEffect`** (the actuator chosen in Phase 0) also sits after the capture
-tap is **untested**. If that effect *did* attenuate the captured signal it would reintroduce exactly
-the blindness described above, and the app-agnostic actuator would have to be abandoned in favour of
-audio-focus ducking. Cheap to test: run the effect probe during a recording and read the rms trace.
-**Do this before building anything on the session-0 actuator.**
+The Phase 4 actuator is an `AudioEffect` on session 0. If that had attenuated the capture path it
+would have reintroduced exactly the blindness above. It does not.
+
+Run in-process (as Phase 4 will), with markers written into the session so stage boundaries come
+from sample offsets rather than wall clock:
+
+| Stage | Frames | Median rms | Δ vs baseline |
+|---|---|---|---|
+| baseline | 22 | −23.49 dBFS | — |
+| `LoudnessEnhancer` −40 dB | 22 | −23.91 dBFS | **−0.42 dB** |
+| off (control) | 22 | −23.67 dBFS | −0.18 dB |
+| `DynamicsProcessing` −60 dB | 23 | −24.45 dBFS | **−0.96 dB** |
+| off (control) | 22 | −23.77 dBFS | −0.28 dB |
+| off (control) | 6 | −24.23 dBFS | −0.74 dB |
+
+The control stages drift −0.18 to −0.74 dB on programme material alone, so −0.42 and −0.96 dB are
+indistinguishable from doing nothing. A −40 dB attenuation of the capture path would have been
+unmistakable.
+
+**The audible control was confirmed by the user: the output dropped out twice during the run.**
+Without that, "capture unaffected" would have been trivially true and meaningless — the effects
+could simply have done nothing at all.
+
+So both attenuation paths, volume and session-0 effect, leave the captured signal intact. The
+detector keeps watching through its own mute and can therefore detect the ad *ending*.
+
+`Attenuator` is committed as the real actuator, not scaffolding.
+
+**Still owed before Phase 4 ships:**
+- A **watchdog**. The effect attenuates everything — alarms, navigation, calls. `releaseQuietly()`
+  is called from `stopAll()` and the test's `finally`, but nothing yet force-releases on a stuck
+  state, process death, or a mute that has run implausibly long.
+- **Route changes** (Bluetooth connect/disconnect, headphone unplug) untested.
 
 ## Deviations from the roadmap
 
