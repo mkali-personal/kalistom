@@ -9,14 +9,14 @@ Design review, issues and full roadmap: see the plan at
 
 ## Where the project stands
 
-See [`docs/phase0-results.md`](docs/phase0-results.md) for the Phase 0 findings.
+Findings: [`docs/phase0-results.md`](docs/phase0-results.md), [`docs/phase1-results.md`](docs/phase1-results.md).
 
 | Phase | What | Status |
 |---|---|---|
 | 0a | Toolchain + zero-code manifest probe | **PASSED** - nothing opted out; Spotify opts in |
 | 0b | Capture feasibility spike | **PASSED** - Kan captured cleanly on Android 16 |
-| 1 | Session recorder (`.opus` + `.f16` + `.jsonl`) | not started |
-| 2 | Audacity labelling + offline eval harness | not started |
+| 1 | Session recorder (`.wav` + `.f16` + `.jsonl`) | **DONE** - alignment verified to 0.0002 dB |
+| 2 | Audacity labelling + offline eval harness | next |
 | 3 | Model + HMM smoothing | not started |
 | 4 | Actuator (duck / fade / skip) | not started |
 | 5 | Fingerprints + MediaSession metadata | not started |
@@ -24,9 +24,25 @@ See [`docs/phase0-results.md`](docs/phase0-results.md) for the Phase 0 findings.
 
 **The Phase 0 gate has passed** (2026-09-09, Galaxy S23 / Android 16). Phase 1 is unblocked.
 
-A bonus finding from the same session: an unprivileged app *can* attenuate the global output mix
-via an `AudioEffect` on session 0, which displaces `setStreamVolume` as the planned actuator.
-Details and caveats in the results doc.
+Two findings that changed the design:
+
+- An unprivileged app *can* attenuate the global output mix via an `AudioEffect` on session 0,
+  which displaces `setStreamVolume` as the planned actuator.
+- **Capture is independent of the media volume** - measured flat to +0.07 dB with the slider at 0.
+  So you can record training data with the phone silent, and the detector keeps seeing audio while
+  it mutes. Whether the session-0 effect also sits after the capture tap is **untested and must be
+  checked before building on it** - see `docs/phase1-results.md`.
+
+## Recording a session
+
+```bash
+tools/fetch_model.sh                              # once, downloads YAMNet (16 MB)
+python trainer/ingest.py --pull --verify-alignment # pull + prove alignment
+```
+
+On the phone: start playback, open **ads-filter**, tap **Start recording**, grant the projection
+prompt. A session opens when audio starts and closes 30 s after it stops. **Mark** drops a timestamped
+marker. Volume can be at zero throughout.
 
 ## The Phase 0 gate
 
