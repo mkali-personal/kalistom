@@ -21,6 +21,7 @@ import android.os.Looper
 import android.util.Log
 import java.io.File
 import java.util.Locale
+import java.util.concurrent.ConcurrentLinkedQueue
 import kotlin.math.log10
 import kotlin.math.sqrt
 
@@ -44,6 +45,10 @@ class RecorderService : Service() {
         const val EXTRA_DATA = "data"
         const val ACTION_STOP = "com.adsfilter.STOP"
         const val ACTION_MARK = "com.adsfilter.MARK"
+        const val ACTION_ATTEN_TEST = "com.adsfilter.ATTEN_TEST"
+
+        /** Seconds per stage of the attenuation A/B test. */
+        private const val ATTEN_STAGE_SEC = 15L
 
         /** Close the session after this long with nothing playing. */
         private const val IDLE_CLOSE_MS = 30_000L
@@ -77,7 +82,8 @@ class RecorderService : Service() {
     private var session: SessionWriter? = null
 
     @Volatile private var stopping = false
-    @Volatile private var markRequested = false
+    private val markQueue = ConcurrentLinkedQueue<String>()
+    @Volatile private var attenTestRunning = false
 
     private lateinit var audioManager: AudioManager
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -87,7 +93,8 @@ class RecorderService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_STOP -> { stopAll(); return START_NOT_STICKY }
-            ACTION_MARK -> { markRequested = true; return START_STICKY }
+            ACTION_MARK -> { markQueue.add("user"); return START_STICKY }
+            ACTION_ATTEN_TEST -> { startAttenuationTest(); return START_STICKY }
         }
         if (isRunning) return START_STICKY
 
@@ -233,10 +240,10 @@ class RecorderService : Service() {
                 continue
             }
 
-            if (markRequested) {
-                markRequested = false
-                s.writeMarker("user")
-                log("marker written at ${"%.2f".format(Locale.US, s.durationSeconds())}s")
+            while (true) {
+                val label = markQueue.poll() ?: break
+                s.writeMarker(label)
+                log("marker '$label' at ${"%.1f".format(Locale.US, s.durationSeconds())}s")
             }
 
             s.writeAudio(readBuf, got)
@@ -293,6 +300,50 @@ class RecorderService : Service() {
                 .notify(NOTIF_ID, buildNotification(text))
         } catch (_: Throwable) {
         }
+    }
+
+    /**
+     * Does a session-0 AudioEffect attenuate what AudioPlaybackCapture sees?
+     *
+     * This is BLOCKING for Phase 4. The volume slider was measured not to affect capture, which is
+     * what lets the detector keep watching while it mutes. If the effect DOES attenuate the capture
+     * path, that property is lost: muting an ad would feed the model silence and it could never
+     * detect the ad ending. Markers are written into the session so the analysis is exact.
+     */
+    private fun startAttenuationTest() {
+        if (attenTestRunning) { log("attenuation test already running"); return }
+        if (session == null) { log("start a recording first"); return }
+        attenTestRunning = true
+        Thread({
+            try {
+                val stages = listOf<Triple<String, Attenuator.Kind?, Float>>(
+                    Triple("baseline", null, 0f),
+                    Triple("loudness_-40db", Attenuator.Kind.LOUDNESS, -40f),
+                    Triple("off_1", null, 0f),
+                    Triple("dynamics_-60db", Attenuator.Kind.DYNAMICS, -60f),
+                    Triple("off_2", null, 0f)
+                )
+                for ((label, kind, db) in stages) {
+                    if (kind == null) {
+                        Attenuator.releaseQuietly()
+                    } else if (!Attenuator.attach(kind, db)) {
+                        markQueue.add("${label}_FAILED")
+                        log("stage $label: attach refused")
+                        continue
+                    }
+                    markQueue.add(label)
+                    log("attenuation stage: $label")
+                    Thread.sleep(ATTEN_STAGE_SEC * 1000)
+                }
+                markQueue.add("atten_test_end")
+                log("attenuation test done - stop the recording and run trainer/attenuation_report.py")
+            } catch (t: Throwable) {
+                log("attenuation test error: ${t.message}")
+            } finally {
+                Attenuator.releaseQuietly()
+                attenTestRunning = false
+            }
+        }, "atten-test").start()
     }
 
     private fun closeSession() {
@@ -369,6 +420,7 @@ class RecorderService : Service() {
 
     private fun stopAll() {
         stopping = true
+        Attenuator.releaseQuietly()   // never leave the device attenuated
         try { worker?.join(3000) } catch (_: InterruptedException) {}
         worker = null
         closeSession()

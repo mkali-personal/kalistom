@@ -57,6 +57,10 @@ class MainActivity : Activity() {
         row2.addView(button("Sessions") { listSessions() }, equal())
         root.addView(row2)
 
+        root.addView(button("Attenuation vs capture test (75s)") {
+            send(RecorderService.ACTION_ATTEN_TEST)
+        })
+
         logView = TextView(this).apply {
             textSize = 11f
             typeface = android.graphics.Typeface.MONOSPACE
