@@ -256,7 +256,9 @@ def cmd_parse(args) -> int:
         else:
             merged.append(list(s))
 
-    lab = base.with_suffix(".labels.txt")
+    # Deliberately not ".labels.txt": stitch.py owns that name for join markers, and a draft
+    # that overwrote them would destroy the only record of where the audio is discontinuous.
+    lab = base.with_suffix(".draft.txt")
     lab.write_text("".join(f"{a:.3f}\t{b:.3f}\tad ({c}) {w}\n" for a, b, c, w in merged),
                    encoding="utf-8")
     total = sum(b - a for a, b, _, _ in merged)

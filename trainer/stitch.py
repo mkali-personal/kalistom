@@ -21,7 +21,7 @@ a new file begins, because contiguity that cannot be shown should not be implied
 Output goes to captures/stitched:
     run_<timestamp>.wav          contiguous audio
     run_<timestamp>.json         every source segment, its offset in the output, its gap
-    run_<timestamp>.labels.txt   Audacity label track marking the joins
+    run_<timestamp>.joins.txt    Audacity label track marking the joins
 
 Usage:
     python trainer/stitch.py --dry-run                 # report joins, write nothing
@@ -122,7 +122,7 @@ class Run:
         # while marking ad boundaries - a label that straddles one is not trustworthy.
         lines = [f"{p['out_offset_s']:.3f}\t{p['out_offset_s']:.3f}\t"
                  f"join {p['gap_before_s']:+.1f}s" for p in self.parts[1:]]
-        self.path.with_suffix(".labels.txt").write_text(
+        self.path.with_suffix(".joins.txt").write_text(
             "\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
 
 
@@ -220,7 +220,7 @@ def main() -> int:
     print(f"gap at join median {np.median(g):+.2f}s, p95 {np.percentile(g, 95):+.2f}s, "
           f"max {g.max():+.2f}s, total {g[g > 0].sum():.0f}s lost")
     if not args.dry_run:
-        print(f"\nEach run has a .labels.txt marking the joins - import it in Audacity "
+        print(f"\nEach run has a .joins.txt marking the joins - import it in Audacity "
               f"(File > Import > Labels)\nso you can see them while marking ad boundaries.")
     return 0
 
