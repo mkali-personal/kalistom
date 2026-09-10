@@ -142,6 +142,7 @@ def cmd_summary(args) -> int:
     print(f"{'file':28s} {'min':>5s} {'speech%':>7s} {'hits':>5s} {'strong':>6s}  "
           f"breaks near (min)")
     ads = strong_all = 0
+    hours_all = 0.0
     for jf in files:
         doc = load(jf)
         hits = scan_doc(doc)
@@ -156,14 +157,19 @@ def cmd_summary(args) -> int:
             else:
                 cl.append([h["t"]])
         ads += len(cl)
+        hours_all += doc["seconds"] / 3600
         note = "  <-- music: too sparse to label from text" if cov < 40 else ""
         print(f"{jf.name[:-11]:28s} {doc['seconds'] / 60:5.1f} {cov:7.1f} "
               f"{len(hits):5d} {len(strong):6d}  "
               f"{', '.join(f'{c[0] / 60:.0f}' for c in cl)}{note}")
     print()
+    per_hour = ads / max(hours_all, 1e-9)
     print(f"{strong_all} strong hit(s) in about {ads} break(s) across {len(files)} file(s)")
-    print("Zero hits is a real answer, not a failure: this station carries almost no advertising")
-    print("between roughly 00:30 and 05:30.")
+    print(f"{hours_all:.2f} h of audio, {per_hour:.2f} break(s) per hour")
+    print()
+    print("A file with zero hits is usually a real answer rather than a failure. Measured over")
+    print("11.72 h of this station on 2026-09-10: 4.29 breaks/hour between 07:30 and 12:10,")
+    print("3.50 between 05:30 and 07:30, and 0.41 between 00:30 and 05:30. Record daytime.")
     return 0
 
 

@@ -243,3 +243,32 @@ Two further findings from the same pass:
   boilerplate, so the hits cluster mid-break, and the scan missed a station promo reel entirely,
   because a broadcaster advertising its own programmes recites no small print. Break detection and
   boundary finding are separate jobs; the model pass does the second.
+
+### Daytime confirms it, measured (2026-09-10)
+
+A second recording covering 07:22 to 12:07 was added, bringing the corpus to 11.72 h. Counting ad
+breaks by time of day settles the question:
+
+| Period | Hours | Breaks | Per hour |
+|---|---|---|---|
+| 23:50-00:30 | 1.07 | 2 | 1.86 |
+| 00:30-05:30 | 4.92 | 2 | **0.41** |
+| 05:30-07:30 | 2.00 | 7 | 3.50 |
+| 07:30-12:10 | 3.73 | 16 | **4.29** |
+| total | 11.72 | 27 | 2.30 |
+
+Daytime carries **ten times** the ad density of the small hours. An hour recorded at 10:00 is worth
+about ten hours recorded at 03:00, so labelling effort and disk should both go to daytime.
+
+The count rose from the 7 breaks first reported partly because the corpus grew and partly because
+the scan improved: reading transcripts turned up that presenters announce breaks out loud
+("יוצאים להפסקה קטנה, פרסומות"), which is the only marker that lands at the *start* of a break -
+every piece of legal boilerplate lands at the end of a spot instead.
+
+**A limitation of transcript-based labelling, found the same way.** In several breaks the
+recogniser produces nothing for 30 to 70 seconds while the audio continues at a normal -24 dBFS.
+That is not silence; it is jingles, stings and sung sponsor beds carrying no intelligible speech.
+So a transcript can say that a break is happening and roughly where it ends, but it cannot see
+inside those stretches, and a label drawn across one is partly guesswork. Two rebroadcast
+programmes show the mirror image: the host says "פרסומות" but only a station ident follows,
+because a rebroadcast carries the cue without the advertising.
