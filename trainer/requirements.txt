@@ -1,0 +1,11 @@
+# Desktop side only. The Android app needs none of this.
+#
+# Not listed here because they are not pip packages:
+#   ffmpeg   - required by tools/record_stream.sh to record the live stream
+#   adb      - required only to talk to the phone (part of the Android SDK)
+#
+# The Hebrew Whisper model is not listed either: faster-whisper downloads it on first use,
+# about 1.6 GB, into the Hugging Face cache under ~/.cache/huggingface.
+
+numpy>=1.24          # stitch.py, skew_test.py, compare_labels.py
+faster-whisper>=1.2  # transcribe.py (pulls in ctranslate2; no torch needed)

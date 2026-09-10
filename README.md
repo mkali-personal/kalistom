@@ -33,6 +33,52 @@ Two findings that changed the design:
   it mutes. The session-0 effect was tested the same way and also leaves capture intact (-0.4 dB
   against -0.2..-0.7 dB control drift), so the app-agnostic actuator is confirmed viable.
 
+## Setting up on another computer
+
+The desktop side needs very little, and what it needs depends on what that machine is for.
+
+**To record the live stream and nothing else** — the case for a spare machine left running
+overnight — you need `ffmpeg` on the PATH and a clone of this repository. Nothing else at all:
+no Python packages, no model, no Android SDK.
+
+```bash
+git clone https://github.com/mkali-personal/kalistom.git
+cd kalistom
+tools/record_stream.sh 8                       # 8 hours into captures/desktop
+```
+
+Check first that the machine will not sleep, hibernate or install updates overnight. A machine
+that suspends at 2 a.m. leaves you a broken final segment and nothing after it, and you will not
+find out until morning. Press Ctrl+C to stop rather than closing the window, so ffmpeg finalises
+the file; if it is killed instead, `python trainer/repair_wav.py captures/desktop/*.wav` recovers
+the audio, which is all still on disk.
+
+**To also stitch, transcribe and label** on that machine:
+
+```bash
+pip install --user -r trainer/requirements.txt
+python trainer/stitch.py                       # 149 segments -> ~15 half-hour files
+python trainer/transcribe.py                   # Hebrew ASR with word-level timestamps
+```
+
+The Hebrew Whisper model is not in the repository and does not need to be fetched by hand:
+`faster-whisper` downloads it on first use, about 1.6 GB, into `~/.cache/huggingface`. Expect
+roughly 1.2x realtime on a laptop CPU, so a night's recording takes about six hours.
+
+**Recordings do not travel through git** — `captures/` is ignored, and a night is about 900 MB.
+Move them on a USB stick, over a network share, or with Syncthing pointed at the output directory.
+Converting to FLAC first (`ffmpeg -i in.wav -c:a flac out.flac`) is lossless, roughly halves the
+size, and Audacity opens FLAC natively.
+
+**To build or run the Android app** you additionally need the Android SDK and one download that is
+kept out of git:
+
+```bash
+tools/fetch_model.sh                           # YAMNet, 16 MB, into app/src/main/assets/
+```
+
+Labelling in Audacity: see [`docs/labelling.md`](docs/labelling.md).
+
 ## Recording a session
 
 ```bash
