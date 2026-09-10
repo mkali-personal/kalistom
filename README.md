@@ -1,4 +1,4 @@
-# ads-filter
+# Kalistom
 
 A private, sideloaded Android app that detects commercials in the phone's **playback** audio and
 drops the volume until they end. Personal use only — never published to Play.
