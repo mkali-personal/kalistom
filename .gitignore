@@ -3,7 +3,20 @@
 .gradle/
 build/
 local.properties
-captures/
+# Recordings and embeddings are large and reproducible; labels are neither. Marking ad breaks
+# is the expensive step in this project, so the label tracks, transcripts and stitch manifests
+# are kept in git even though the audio beside them is not.
+captures/**
+!captures/
+!captures/*/
+!captures/**/*.truth.txt
+!captures/**/*.gemini.txt
+!captures/**/*.claude.txt
+!captures/**/*.joins.txt
+!captures/**/*.markers.txt
+!captures/**/*.transcript.txt
+!captures/**/*.json
+captures/**/*.words.json
 .DS_Store
 
 # model is 16 MB; tools/fetch_model.sh downloads it

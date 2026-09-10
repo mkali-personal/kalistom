@@ -1,0 +1,92 @@
+{
+  "source": "desktop stream, stitched",
+  "sample_rate": 16000,
+  "seconds": 2116.032,
+  "continues_previous": false,
+  "parts": [
+    {
+      "file": "desk_20260910_075426.wav",
+      "out_offset_s": 0.0,
+      "seconds": 64.0,
+      "trimmed_s": 0.0,
+      "gap_before_s": null
+    },
+    {
+      "file": "desk_20260910_075529.wav",
+      "out_offset_s": 64.0,
+      "seconds": 364.011,
+      "trimmed_s": 0.0,
+      "gap_before_s": 2.08
+    },
+    {
+      "file": "desk_20260910_080135.wav",
+      "out_offset_s": 428.011,
+      "seconds": 56.0,
+      "trimmed_s": 0.0,
+      "gap_before_s": 2.34
+    },
+    {
+      "file": "desk_20260910_080234.wav",
+      "out_offset_s": 484.011,
+      "seconds": 24.0,
+      "trimmed_s": 0.0,
+      "gap_before_s": 0.77
+    },
+    {
+      "file": "desk_20260910_080258.wav",
+      "out_offset_s": 508.011,
+      "seconds": 340.011,
+      "trimmed_s": 0.0,
+      "gap_before_s": -0.1
+    },
+    {
+      "file": "desk_20260910_080839.wav",
+      "out_offset_s": 848.021,
+      "seconds": 56.0,
+      "trimmed_s": 0.0,
+      "gap_before_s": 3.65
+    },
+    {
+      "file": "desk_20260910_080938.wav",
+      "out_offset_s": 904.021,
+      "seconds": 200.0,
+      "trimmed_s": 0.0,
+      "gap_before_s": -1.13
+    },
+    {
+      "file": "desk_20260910_081257.wav",
+      "out_offset_s": 1104.021,
+      "seconds": 164.011,
+      "trimmed_s": 0.0,
+      "gap_before_s": 1.6
+    },
+    {
+      "file": "desk_20260910_081542.wav",
+      "out_offset_s": 1268.032,
+      "seconds": 59.989,
+      "trimmed_s": 0.0,
+      "gap_before_s": -0.85
+    },
+    {
+      "file": "desk_20260910_081642.wav",
+      "out_offset_s": 1328.021,
+      "seconds": 372.011,
+      "trimmed_s": 0.0,
+      "gap_before_s": 0.17
+    },
+    {
+      "file": "desk_20260910_082254.wav",
+      "out_offset_s": 1700.032,
+      "seconds": 51.989,
+      "trimmed_s": 0.0,
+      "gap_before_s": 0.16
+    },
+    {
+      "file": "desk_20260910_082346.wav",
+      "out_offset_s": 1752.021,
+      "seconds": 364.011,
+      "trimmed_s": 0.0,
+      "gap_before_s": 0.82
+    }
+  ]
+}
