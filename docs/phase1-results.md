@@ -208,3 +208,38 @@ installed, which is convenient, since it does not have one.
 The laptop stream lags the phone app by about **347 seconds** — nearly six minutes. This is why
 `trainer/skew_test.py` aligns before it compares; a naive comparison of the two on wall-clock time
 would show almost no correlation and imply, wrongly, that they carry different audio.
+
+## Overnight recording is the wrong shift (2026-09-10)
+
+The first full night, 23:52 to 07:48, gave 7.92 hours across 15 stitched files. Transcribed and
+scanned for the phrases that mark a commercial break, the advertising turns out to be almost
+entirely absent:
+
+| Hours | Files | Ad breaks found |
+|---|---|---|
+| 23:52-00:23 | 1 | 1 |
+| 00:23-05:52 | 10 | **0** |
+| 05:52-07:48 | 4 | 6 |
+
+This is the broadcast, not a failure of the scan. `כפוף` - the single strongest indicator, the
+opening of the terms-and-conditions boilerplate - occurs 7 times in the 23:52 file, **zero times in
+all ten files between 00:23 and 05:52**, and returns from 05:52 onward. `בחסות` occurs only after
+06:52. (High counts of `רשת` are a false friend: it is the station's own name, `רשת ב׳`.)
+
+So the night yielded roughly 7 breaks, about 18 minutes of advertising in 475 minutes, or 3.8 % -
+against the 10-20 % the plan assumed. As a training set that is badly short of positive examples,
+and the shortfall is not fixable by recording more nights. **Record daytime instead**, where
+commercial density is highest: the morning drive and the afternoon drive.
+
+Two further findings from the same pass:
+
+- **Some overnight programming is music, and cannot be labelled from text.** Speech coverage - the
+  fraction of the recording the recogniser produced words for - runs 83-92 % on talk programmes but
+  falls to 25 % on the 04:15 file and 55-60 % on two others, which are song programmes transcribing
+  as sparse lyrics. `ad_spans.py summary` flags anything under 40 %. Those hours would need marking
+  by ear; they happen to contain no advertising, so nothing is lost this time.
+- **The keyword scan finds breaks but never their edges.** On the one file labelled in full, all
+  seven hits fell inside the true break, so precision was perfect - but every hit was *closing*
+  boilerplate, so the hits cluster mid-break, and the scan missed a station promo reel entirely,
+  because a broadcaster advertising its own programmes recites no small print. Break detection and
+  boundary finding are separate jobs; the model pass does the second.

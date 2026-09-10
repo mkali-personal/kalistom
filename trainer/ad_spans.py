@@ -117,6 +117,48 @@ def scan_doc(doc: dict) -> list[dict]:
     return hits
 
 
+def speech_coverage(doc: dict) -> float:
+    """Fraction of the recording the recogniser produced words for. Low means music rather than
+    failure - an overnight song programme transcribes as sparse lyrics - but either way a
+    transcript that covers a quarter of the audio cannot be labelled from."""
+    total = sum(s["end"] - s["start"] for s in doc["segments"])
+    return 100.0 * total / max(doc["seconds"], 1e-9)
+
+
+def cmd_summary(args) -> int:
+    """One line per recording: is there speech, and is there advertising."""
+    files = sorted(Path(args.src).glob("*.words.json"))
+    if not files:
+        print(f"no transcripts in {args.src} - run trainer/transcribe.py first")
+        return 1
+    print(f"{'file':28s} {'min':>5s} {'speech%':>7s} {'hits':>5s} {'strong':>6s}  "
+          f"breaks near (min)")
+    ads = strong_all = 0
+    for jf in files:
+        doc = load(jf)
+        hits = scan_doc(doc)
+        strong = [h for h in hits if h["weight"] >= 0.85]
+        strong_all += len(strong)
+        cov = speech_coverage(doc)
+        # Strong hits within two minutes of each other are one break, not several.
+        cl: list[list[float]] = []
+        for h in strong:
+            if cl and h["t"] - cl[-1][-1] <= 120:
+                cl[-1].append(h["t"])
+            else:
+                cl.append([h["t"]])
+        ads += len(cl)
+        note = "  <-- music: too sparse to label from text" if cov < 40 else ""
+        print(f"{jf.name[:-11]:28s} {doc['seconds'] / 60:5.1f} {cov:7.1f} "
+              f"{len(hits):5d} {len(strong):6d}  "
+              f"{', '.join(f'{c[0] / 60:.0f}' for c in cl)}{note}")
+    print()
+    print(f"{strong_all} strong hit(s) in about {ads} break(s) across {len(files)} file(s)")
+    print("Zero hits is a real answer, not a failure: this station carries almost no advertising")
+    print("between roughly 00:30 and 05:30.")
+    return 0
+
+
 def cmd_scan(args) -> int:
     files = sorted(Path(args.src).glob("*.words.json"))
     if not files:
@@ -281,6 +323,9 @@ def main() -> int:
     s.add_argument("--all", action="store_true", help="show weak hits too")
     s.add_argument("--dry-run", action="store_true")
     s.set_defaults(fn=cmd_scan)
+
+    m = sub.add_parser("summary", help="one line per recording: speech and advertising found")
+    m.set_defaults(fn=cmd_summary)
 
     p = sub.add_parser("prompt", help="write paste-ready prompts for a chat model")
     p.add_argument("--out", default=str(root / "captures" / "prompts"))
