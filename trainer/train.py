@@ -93,6 +93,34 @@ def discover(d: Path) -> list[tuple[Path, Path, Path, Path | None]]:
     return out
 
 
+class Projection:
+    """Standardisation, and optionally a PCA down to `dim` components.
+
+    Fitted on training rows only, and used for both halves of a fold. The dimensionality is the
+    point: 10 frames of a 1024-d embedding is 10,250 features, against roughly 13,700 usable rows,
+    so plain logistic regression has enough freedom to memorise the training set outright - which
+    it demonstrably does, scoring a perfect fit. Projecting onto the leading components first is
+    the cheapest honest way to take that freedom away.
+    """
+
+    def __init__(self, X: np.ndarray, dim: int):
+        self.mu = X.mean(0)
+        self.sd = X.std(0) + 1e-6
+        self.basis = None
+        if dim and dim < X.shape[1]:
+            Z = (X - self.mu) / self.sd
+            # Randomised range-finder: full SVD of a 13k x 10k matrix is not worth the wait.
+            rng = np.random.default_rng(0)
+            Q, _ = np.linalg.qr(Z.T @ (Z @ rng.standard_normal((Z.shape[1], dim + 10),
+                                                               dtype=np.float32)))
+            _, _, Vt = np.linalg.svd((Z @ Q), full_matrices=False)
+            self.basis = (Q @ Vt.T[:, :dim]).astype(np.float32)
+
+    def apply(self, X: np.ndarray) -> np.ndarray:
+        Z = (X - self.mu) / self.sd
+        return Z if self.basis is None else Z @ self.basis
+
+
 def blocks(n: int, block_frames: int, folds: int) -> np.ndarray:
     """Fold assignment by contiguous block, so overlapping neighbours stay on the same side."""
     return (np.arange(n) // block_frames) % folds
@@ -152,9 +180,55 @@ def report(y: np.ndarray, p: np.ndarray, on: float, off: float, title: str) -> d
           f"F1 {100 * 2 * prec * rec / max(prec + rec, 1e-9):5.1f}%")
     print(f"  what you hear  {heard / max(hours, 1e-9):6.0f} ad-seconds heard per hour")
     print(f"  what you lose  {wrong / max(hours, 1e-9):6.0f} content-seconds muted per hour")
+    # The comparison that decides whether any of this is worth shipping. Switching the app off
+    # mutes no content and lets every ad through; a model is only useful if the ad-seconds it
+    # saves are worth more than the content-seconds it costs. Printing the do-nothing baseline
+    # beside every result keeps that trade visible instead of implied.
+    base = int((y == POSITIVE).sum()) * HOP_S / max(hours, 1e-9)
+    saved = base - heard / max(hours, 1e-9)
+    cost = wrong / max(hours, 1e-9)
+    print(f"  do nothing     {base:6.0f} ad-seconds heard per hour, 0 content muted")
+    print(f"  the trade      saves {saved:.0f} ad-seconds, costs {cost:.0f} content-seconds "
+          f"({saved / max(cost, 1e-9):.2f} saved per second lost)")
     return {"precision": prec, "recall": rec,
+            "ad_seconds_saved_per_hour": saved, "trade_ratio": saved / max(cost, 1e-9),
             "ad_seconds_heard_per_hour": heard / max(hours, 1e-9),
             "content_seconds_muted_per_hour": wrong / max(hours, 1e-9)}
+
+
+def sweep(y: np.ndarray, p: np.ndarray, gap: float) -> None:
+    """What the same predictions buy at every operating point.
+
+    The model produces a probability; the app chooses what to do about it. Those are separate
+    decisions, and reporting one threshold hides the choice. A model that looks useless at 0.6
+    can be worth shipping at 0.9, because muting less often costs a few ad-seconds and saves a
+    great many content-seconds - and content is the thing worth protecting.
+    """
+    hours = len(y) * HOP_S / 3600
+    base = int((y == POSITIVE).sum()) * HOP_S / max(hours, 1e-9)
+    print()
+    print("OPERATING POINT (same predictions, different thresholds)")
+    print(f"{'on':>6s} {'off':>6s} {'ad-sec heard/h':>15s} {'content-sec lost/h':>19s} "
+          f"{'saved per lost':>15s}")
+    best = None
+    for on in (0.5, 0.6, 0.7, 0.8, 0.9, 0.95, 0.98, 0.99):
+        off = max(on - gap, 0.02)
+        muted = policy(p, on, off)
+        heard = int(((y == POSITIVE) & ~muted).sum()) * HOP_S / max(hours, 1e-9)
+        lost = int(((y == 0) & muted).sum()) * HOP_S / max(hours, 1e-9)
+        saved = base - heard
+        ratio = saved / max(lost, 1e-9)
+        mark = ""
+        if lost <= 10 and (best is None or saved > best[1]):
+            best, mark = (on, saved), "  <-- meets the <10s/h target"
+        print(f"{on:6.2f} {off:6.2f} {heard:15.0f} {lost:19.0f} {ratio:15.1f}{mark}")
+    print(f"  (doing nothing: {base:.0f} ad-seconds heard per hour, 0 content lost)")
+    if best:
+        print(f"  At on={best[0]:.2f} the model saves {best[1]:.0f} ad-seconds per hour while")
+        print(f"  staying inside the plan's 10 content-seconds/hour budget.")
+    else:
+        print("  No threshold keeps content loss under 10 s/h. The model is not discriminating")
+        print("  well enough yet for any operating point to be worth switching on.")
 
 
 def main() -> int:
@@ -166,6 +240,8 @@ def main() -> int:
     ap.add_argument("--joins", default="", help="join markers from stitch.py")
     ap.add_argument("--meta", default="", help=".jsonl beside the embeddings (for rms)")
     ap.add_argument("--context", type=int, default=10, help="frames of context per row")
+    ap.add_argument("--pca", type=int, default=0,
+                    help="project onto this many principal components first (0 = no projection)")
     ap.add_argument("--l2", type=float, default=1e-3)
     ap.add_argument("--iters", type=int, default=3000)
     ap.add_argument("--folds", type=int, default=5)
@@ -173,6 +249,7 @@ def main() -> int:
     ap.add_argument("--on", type=float, default=0.6, help="start attenuating above this")
     ap.add_argument("--off", type=float, default=0.2, help="stop attenuating below this")
     ap.add_argument("--out", default="", help="write head weights here as JSON")
+    ap.add_argument("--save-oof", default="", help="save out-of-fold predictions as .npz")
     args = ap.parse_args()
 
     if args.dir:
@@ -217,10 +294,6 @@ def main() -> int:
     print(f"features: {X.shape[1]} per frame ({args.context} frames of context = "
           f"{(args.context - 1) * HOP_S + 0.975:.1f}s)")
 
-    mu, sd = X.mean(0), X.std(0) + 1e-6
-    X -= mu
-    X /= sd
-
     if (y == POSITIVE).sum() == 0:
         print("\nNo positive frames - nothing to learn. Check the label track's time range.")
         return 1
@@ -239,7 +312,11 @@ def main() -> int:
         print(f"\nsplit: {n_folds}-fold by {args.block_seconds:.0f}s block within one recording")
     args.folds = n_folds
 
-    # Out-of-fold predictions: every frame is scored by a model that never saw its block.
+    # Out-of-fold predictions: every frame is scored by a model that never saw its recording.
+    # Everything fitted to the data - the standardisation and the PCA basis as well as the
+    # weights - is fitted inside the fold, on training rows only. Standardising the whole matrix
+    # first is a small leak but a real one, and it is exactly the sort that makes a held-out
+    # number quietly optimistic.
     oof = np.zeros(len(y), dtype=np.float32)
     for f in range(args.folds):
         tr = keep & (fold != f)
@@ -248,17 +325,25 @@ def main() -> int:
             print(f"  {held}: one class missing in training - skipped")
             oof[fold == f] = 0.0
             continue
-        w = fit(X[tr], y[tr].astype(np.float32), args.l2, args.iters)
-        oof[fold == f] = predict(X[fold == f], w)
-        te = keep & (fold == f)
-        if te.sum():
-            m1 = report(y[fold == f], oof[fold == f], args.on, args.off, f"  held out: {held}")
-            del m1
+        proj = Projection(X[tr], args.pca)
+        w = fit(proj.apply(X[tr]), y[tr].astype(np.float32), args.l2, args.iters)
+        oof[fold == f] = predict(proj.apply(X[fold == f]), w)
+        if (keep & (fold == f)).sum():
+            report(y[fold == f], oof[fold == f], args.on, args.off, f"  held out: {held}")
 
-    w_full = fit(X[keep], y[keep].astype(np.float32), args.l2, args.iters)
-    report(y, predict(X, w_full), args.on, args.off, "FIT (trained on everything - memorisation)")
-    m = report(y, oof, args.on, args.off,
-               f"HELD OUT ({args.folds}-fold by {args.block_seconds:.0f}s block)")
+    proj_full = Projection(X[keep], args.pca)
+    w_full = fit(proj_full.apply(X[keep]), y[keep].astype(np.float32), args.l2, args.iters)
+    report(y, predict(proj_full.apply(X), w_full), args.on, args.off,
+           "FIT (trained on everything - memorisation)")
+    split_name = ("leave-one-recording-out" if len(recs) > 1
+                  else f"{args.folds}-fold by {args.block_seconds:.0f}s block")
+    m = report(y, oof, args.on, args.off, f"HELD OUT, POOLED ({split_name})")
+    sweep(y, oof, args.on - args.off)
+    if args.save_oof:
+        np.savez(args.save_oof, y=y, p=oof, groups=groups, names=np.array(names))
+        print()
+        print(f"out-of-fold predictions saved to {args.save_oof} - sweeping thresholds again")
+        print("needs no refitting.")
 
     n_breaks = total_spans
     print("\nVERDICT")
@@ -285,7 +370,8 @@ def main() -> int:
             "context_frames": args.context,
             "uses_rms": bool(rms is not None and len(rms) == len(emb)),
             "input_dim": int(X.shape[1]),
-            "mean": mu.tolist(), "scale": sd.tolist(),
+            "mean": proj_full.mu.tolist(), "scale": proj_full.sd.tolist(),
+            "pca": None if proj_full.basis is None else proj_full.basis.tolist(),
             "weights": w_full[:-1].tolist(), "bias": float(w_full[-1]),
             "on": args.on, "off": args.off,
             "trained_on": {"recordings": names, "ad_breaks": n_breaks},
