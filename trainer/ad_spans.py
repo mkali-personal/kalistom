@@ -258,7 +258,7 @@ def cmd_parse(args) -> int:
 
     # Deliberately not ".labels.txt": stitch.py owns that name for join markers, and a draft
     # that overwrote them would destroy the only record of where the audio is discontinuous.
-    lab = base.with_suffix(".draft.txt")
+    lab = Path(args.out) if args.out else base.with_suffix(".draft.txt")
     lab.write_text("".join(f"{a:.3f}\t{b:.3f}\tad ({c}) {w}\n" for a, b, c, w in merged),
                    encoding="utf-8")
     total = sum(b - a for a, b, _, _ in merged)
@@ -290,6 +290,7 @@ def main() -> int:
     q = sub.add_parser("parse", help="turn a model's TSV reply into Audacity labels")
     q.add_argument("stem", help="e.g. run_20260909_235255")
     q.add_argument("reply", help="file holding the model's TSV reply")
+    q.add_argument("--out", default="", help="write labels here instead of <stem>.draft.txt")
     q.add_argument("--merge-gap", type=float, default=5.0,
                    help="join spans closer together than this many seconds")
     q.set_defaults(fn=cmd_parse)
