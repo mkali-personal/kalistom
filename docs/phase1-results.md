@@ -272,3 +272,42 @@ So a transcript can say that a break is happening and roughly where it ends, but
 inside those stretches, and a label drawn across one is partly guesswork. Two rebroadcast
 programmes show the mirror image: the host says "פרסומות" but only a station ident follows,
 because a rebroadcast carries the cue without the advertising.
+
+## First model that works (2026-09-10)
+
+Twelve recordings, 31 labelled ad breaks, 6.14 h, leave-one-recording-out. Every held-out fold is
+a different hour of broadcast with different presenters and a partly different pool of
+advertisements, so a fold's score reflects generalisation rather than jingle recognition.
+
+| | 4 recordings, 7 breaks | 12 recordings, 31 breaks |
+|---|---|---|
+| pooled precision | 57.6 % | **83.6 %** |
+| pooled recall | 61.1 % | **90.6 %** |
+| best trade (saved per second lost) | 1.8 | **12.3** |
+| content-seconds lost at that point | 79 | **26** |
+
+At `on=0.99 / off=0.98` the model removes 334 of the 481 ad-seconds in an average hour while
+wrongly muting 26 seconds of programme. That is still above the plan's 10 s/h target, but it is a
+usable trade rather than the roughly one-for-one exchange the smaller dataset produced.
+
+**The gain came from labels, not from modelling.** Nothing about the head changed between the two
+columns except the optimiser, which only made it faster. Quadrupling the labelled breaks did all
+of it - which is the plan's cold-start prediction, measured.
+
+**A split in the results that needs explaining before it is trusted:**
+
+| Group | Best trade | Content-seconds lost |
+|---|---|---|
+| the 4 recordings labelled first | 3.8 | 41 |
+| the 8 daytime recordings labelled later | **17.7** | **21** |
+
+Two explanations fit. The early recordings may simply be harder - they are the sparse ones, with a
+single break each, at hours when the station barely advertises. Or the labelling convention drifted
+between the first batch and the second: the later files were marked after the presenter-announcement
+markers were found and after many transcripts had been read, so the boundaries may be drawn more
+consistently. Those have opposite remedies, and nothing in the data distinguishes them.
+
+**This is what the human gate is for.** Every number above rests on labels produced by a model, and
+their error has never been measured. Marking one recording by hand, without looking at the draft
+first, and running `trainer/compare_labels.py` would settle both the general question and this
+specific one.

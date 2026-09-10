@@ -127,23 +127,46 @@ def blocks(n: int, block_frames: int, folds: int) -> np.ndarray:
 
 
 def fit(X: np.ndarray, y: np.ndarray, l2: float, iters: int) -> np.ndarray:
-    """Logistic regression by gradient descent, class-balanced. Written out rather than pulled from
-    sklearn so the weights are plainly ours to ship to the phone as JSON."""
-    Xb = np.hstack([X, np.ones((len(X), 1), dtype=np.float32)])
-    w = np.zeros(Xb.shape[1], dtype=np.float32)
+    """Class-balanced logistic regression, solved with L-BFGS.
+
+    Written out rather than pulled from sklearn so the weights are plainly ours to ship to the
+    phone as JSON. Fixed-step gradient descent did the same job but needed thousands of passes
+    over the design matrix, which is minutes per fold once there are tens of thousands of rows;
+    L-BFGS gets there in a couple of hundred.
+
+    The bias is carried separately rather than by appending a column of ones. That column would
+    copy the entire design matrix - close to two gigabytes here - on every call.
+    """
+    from scipy.optimize import minimize                    # imported late; only this needs it
+
+    n, d = X.shape
     pos, neg = max((y == 1).sum(), 1), max((y == 0).sum(), 1)
-    sw = np.where(y == 1, 0.5 / pos, 0.5 / neg).astype(np.float32) * len(y)
-    lr = 1.0
-    for _ in range(iters):
-        p = 1.0 / (1.0 + np.exp(-np.clip(Xb @ w, -30, 30)))
-        g = Xb.T @ (sw * (p - y)) / len(y) + l2 * np.concatenate([w[:-1], [0.0]])
-        w -= lr * g
-    return w
+    sw = np.where(y == 1, 0.5 / pos, 0.5 / neg).astype(np.float64) * n
+
+    def loss_grad(w):
+        # The two matrix products stay in float32. Letting a float64 vector meet a float32 matrix
+        # makes numpy promote the whole matrix, which would double an already large allocation.
+        w32 = w.astype(np.float32)
+        z = np.clip(X @ w32[:d] + w32[d], -30, 30).astype(np.float64)
+        p = 1.0 / (1.0 + np.exp(-z))
+        # Weighted cross-entropy, plus L2 on the weights but never on the bias: penalising the
+        # bias would drag the decision threshold towards the majority class for no good reason.
+        ll = float(np.sum(sw * (np.logaddexp(0, z) - y * z)) / n)
+        r = (sw * (p - y) / n).astype(np.float32)
+        g = np.empty_like(w)
+        g[:d] = X.T @ r + l2 * w[:d]
+        g[d] = float(r.sum())
+        return ll + 0.5 * l2 * float(w[:d] @ w[:d]), g
+
+    w0 = np.zeros(d + 1, dtype=np.float64)
+    res = minimize(loss_grad, w0, jac=True, method="L-BFGS-B",
+                   options={"maxiter": iters, "maxcor": 20})
+    return res.x.astype(np.float32)
 
 
 def predict(X: np.ndarray, w: np.ndarray) -> np.ndarray:
-    Xb = np.hstack([X, np.ones((len(X), 1), dtype=np.float32)])
-    return 1.0 / (1.0 + np.exp(-np.clip(Xb @ w, -30, 30)))
+    d = X.shape[1]
+    return 1.0 / (1.0 + np.exp(-np.clip(X @ w[:d] + w[d], -30, 30)))
 
 
 def policy(p: np.ndarray, on: float, off: float) -> np.ndarray:
@@ -236,13 +259,15 @@ def sweep(y: np.ndarray, p: np.ndarray, gap: float = 0.0) -> None:
             best = max(ok, key=lambda r: r[0])
             print(f"  within {budget:.0f} content-seconds/hour: on={best[2]:.2f} off={best[3]:.2f} "
                   f"saves {best[0]:.0f} ad-seconds/hour")
-            return
+            return {"budget": budget, "saved": best[0], "lost": best[1],
+                    "on": best[2], "off": best[3]}
     worst_case = min(rows, key=lambda r: r[1])
     print(f"  No operating point keeps content loss under 60 s/h - the most conservative setting")
     print(f"  tried (on={worst_case[2]:.2f} off={worst_case[3]:.2f}) still wrongly mutes "
           f"{worst_case[1]:.0f} s/h.")
     print("  This is not a tuning problem. The model is not separating advertising from content")
     print("  well enough for any threshold to help, and more labelled breaks are what it needs.")
+    return None
 
 
 def main() -> int:
@@ -352,7 +377,7 @@ def main() -> int:
     split_name = ("leave-one-recording-out" if len(recs) > 1
                   else f"{args.folds}-fold by {args.block_seconds:.0f}s block")
     m = report(y, oof, args.on, args.off, f"HELD OUT, POOLED ({split_name})")
-    sweep(y, oof, args.on - args.off)
+    best_point = sweep(y, oof, args.on - args.off)
     if args.save_oof:
         np.savez(args.save_oof, y=y, p=oof, groups=groups, names=np.array(names))
         print()
@@ -372,9 +397,16 @@ def main() -> int:
         print("  not really unseen. Treat these numbers as an upper bound until a second day of")
         print("  recording exists."
               )
-    elif m["recall"] > 0.8 and m["content_seconds_muted_per_hour"] < 60:
-        print("  Held-out performance is in the range the plan calls usable. Worth shipping to")
-        print("  the phone and listening to.")
+    elif best_point and best_point["budget"] <= 30.0:
+        print(f"  Usable. At on={best_point['on']:.2f} off={best_point['off']:.2f} this saves "
+              f"{best_point['saved']:.0f} ad-seconds per hour")
+        print(f"  while wrongly muting {best_point['lost']:.0f} - a ratio of "
+              f"{best_point['saved'] / max(best_point['lost'], 1e-9):.0f} to 1.")
+        print("  Worth shipping to the phone and listening to.")
+    elif best_point:
+        print(f"  Borderline. The best operating point loses {best_point['lost']:.0f} "
+              f"content-seconds per hour, above the plan's budget of 10.")
+        print("  Worth trying on the phone, but expect to notice the false mutes.")
     else:
         print("  Held-out performance is not yet usable. More labelled breaks before more model.")
 
