@@ -251,8 +251,29 @@ def cmd_prompt(args) -> int:
 
 # ---------------------------------------------------------------- parse
 
-ROW = re.compile(r"^\s*(\d{1,2}:\d{2}:\d{2}(?:\.\d+)?|\d{1,2}:\d{2}(?:\.\d+)?)\s*[\t|]\s*"
-                 r"(\d{1,2}:\d{2}:\d{2}(?:\.\d+)?|\d{1,2}:\d{2}(?:\.\d+)?)\s*[\t|]\s*(.*)$")
+# Be generous about what a row looks like. The prompt tells the model to copy timestamps verbatim
+# from the "[HH:MM:SS.ss]" stamps in the transcript, and a model that does exactly as it is told
+# returns them still wrapped in brackets - so the brackets must be optional rather than a parse
+# failure. Markdown pipe tables and comma separators are accepted for the same reason: the reply
+# comes out of a chat window, and rejecting a correct answer over its punctuation wastes the
+# user's evening, not ours.
+_T = r"\[?\s*(\d{1,2}:\d{2}(?::\d{2})?(?:\.\d+)?)\s*\]?"
+_SEP = r"(?:\s*[\t|,]\s*|\s{2,})"
+ROW = re.compile(r"^\s*\|?\s*" + _T + _SEP + _T + _SEP + r"?(.*)$")
+
+
+def split_rest(rest: str) -> tuple[str, str]:
+    """Confidence and description out of whatever followed the two times."""
+    parts = [c.strip() for c in re.split(r"[\t|]", rest) if c.strip()]
+    if len(parts) < 2 and "," in rest:
+        # Comma-separated: only the FIRST comma divides the columns, since a description like
+        # "Machsanei Chashmal, BTB, AIG" carries commas of its own.
+        head, _, tail = rest.partition(",")
+        parts = [head.strip(), tail.strip()]
+    if not parts:
+        return "?", "ad"
+    known = parts[0].lower() in ("high", "medium", "low")
+    return (parts[0] if known else "?"), (parts[-1] if len(parts) > 1 or not known else "ad")
 
 
 def snap(t: float, edges: list[float]) -> float:
@@ -278,16 +299,24 @@ def cmd_parse(args) -> int:
         m = ROW.match(line.replace("‏", ""))
         if not m:
             if line.strip() and not line.lstrip().startswith(("START", "#", "-", "|--")):
+                print(f"  ignored (not a table row): {line.strip()[:90]}")
                 bad += 1
             continue
         a, b = parse_hms(m.group(1)), parse_hms(m.group(2))
-        rest = [c.strip() for c in re.split(r"[\t|]", m.group(3)) if c.strip()]
-        conf = rest[0] if rest and rest[0].lower() in ("high", "medium", "low") else "?"
-        what = rest[-1] if rest else "ad"
+        conf, what = split_rest(m.group(3))
         if b <= a:
+            print(f"  ignored (end is not after start): {line.strip()[:90]}")
             bad += 1
             continue
         spans.append((snap(a, starts), snap(b, ends), conf, what))
+
+    if not spans:
+        # Overwriting a good label file with an empty one, having said nothing useful about why,
+        # is the worst thing this could do. Refuse, and show what could not be read.
+        print(f"\nNo usable rows in {args.reply} - nothing was written.")
+        print("Expected each row to be: START<TAB>END<TAB>CONFIDENCE<TAB>WHAT")
+        print("with times like 00:04:05.12. Square brackets, | tables and commas are all fine.")
+        return 1
 
     spans.sort()
     merged: list[list] = []
