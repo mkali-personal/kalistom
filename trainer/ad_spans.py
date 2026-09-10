@@ -41,6 +41,14 @@ from pathlib import Path
 # against hand-marked truth - at that point they can be checked rather than guessed at.
 MARKERS: list[tuple[str, float, str]] = [
     ("בחסות", 0.95, "sponsorship announcement"),
+    # The presenters announce the break out loud - "we are going to a short break, commercials".
+    # Found by reading transcripts, not by guessing: this is the only marker that reliably lands
+    # at the START of a break, where all the legal boilerplate lands at the end of each spot.
+    ("פרסומות", 0.95, "presenter announces the break"),
+    ("הפסקה קצרה", 0.9, "presenter announces the break"),
+    ("הפסקה קטנה", 0.9, "presenter announces the break"),
+    ("מיד חוזרים", 0.8, "presenter going into the break"),
+    ("מיד נחזור", 0.8, "presenter going into the break"),
     # Match the stable part of a legal phrase, never the whole wording: the recogniser rendered
     # "יש לעיין בעלון לצרכן לפני השימוש" as "יש לעיין בלון הצרכן לפני השימוש", so a marker for the
     # full phrase found nothing while "יש לעיין" finds it every time.
