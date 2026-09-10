@@ -128,12 +128,29 @@ from. `tools/record_stream.sh` therefore runs each segment as its own ffmpeg inv
 supervisor loop, so an early exit costs the tail of one segment rather than the night, and reports
 how many segments came back short.
 
-**Consecutive segments overlap by about 8 seconds**, measured with `trainer/skew_test.py`'s
-alignment (scores 0.995–0.999, so this is certain rather than inferred). Each restart resumes from
-the stream's live edge, which lags real time by the buffer depth, so the new segment re-delivers
-audio the previous one already had. At 30-minute segments that is under 0.5 % duplication, but
-identical audio appearing in both a training and a test split would inflate results, so ingest
-should trim each segment's head against the previous segment's tail.
+**Consecutive segments do not overlap; each restart loses about a second.** An earlier note here
+claimed roughly 8 seconds of overlap per restart, inferred from a `skew_test.py` alignment score.
+That was wrong, and the correction matters because it reverses what the stitching step has to do.
+Measured over the 148 restarts of the 2026-09-10 overnight run: no two consecutive segments share
+a single byte of audio, tested by searching each segment's first 0.25 s verbatim within the
+previous segment's last 120 s. Correlation had suggested otherwise only because ordinary speech
+similarity produces peaks in the 0.4–0.66 range, well short of proof; a quarter-second exact byte
+run cannot occur by chance, so the verbatim test settles it.
+
+What restarts actually cost is a small hole. Estimating each gap as
+`(exit_time_B − duration_B) − exit_time_A` — both invocations have converged to the stream's live
+edge by the time they exit — gives a median of +0.10 s, a 5th–95th percentile range of −1.8 s to
++2.5 s, a maximum of +3.4 s, and 108 s lost across the whole 7.92-hour night, which is 0.4 %.
+
+So there is no duplication to trim, and no risk of the same audio landing in both a training and a
+test split. There is instead a seam at every join. `trainer/stitch.py` butt-joins the segments,
+records each join and its estimated gap in a per-run JSON manifest, and writes an Audacity label
+track marking the joins, so a boundary drawn across one is visible as suspect rather than
+invisible. A gap over 5 s closes the run and starts a new file, because contiguity that cannot be
+shown should not be implied.
+
+The overnight run reduced this way from 149 segments to 15 files of about half an hour each,
+covering 7.92 hours with 134 joins and no break over 5 s.
 
 **Desktop and phone audio are interchangeable — measured, not assumed.** A phone session and a
 desktop segment covering the same five minutes of broadcast were aligned (envelope correlation
