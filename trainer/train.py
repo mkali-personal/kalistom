@@ -196,39 +196,53 @@ def report(y: np.ndarray, p: np.ndarray, on: float, off: float, title: str) -> d
             "content_seconds_muted_per_hour": wrong / max(hours, 1e-9)}
 
 
-def sweep(y: np.ndarray, p: np.ndarray, gap: float) -> None:
+def sweep(y: np.ndarray, p: np.ndarray, gap: float = 0.0) -> None:
     """What the same predictions buy at every operating point.
 
     The model produces a probability; the app chooses what to do about it. Those are separate
-    decisions, and reporting one threshold hides the choice. A model that looks useless at 0.6
-    can be worth shipping at 0.9, because muting less often costs a few ad-seconds and saves a
-    great many content-seconds - and content is the thing worth protecting.
+    decisions, and reporting a single threshold hides the choice - a model that looks useless at
+    0.6 can be worth shipping at 0.95, because muting less often costs a few ad-seconds and saves
+    a great many content-seconds, and the programme is the thing worth protecting.
+
+    Both thresholds are swept independently. Tying `off` to `on` by a fixed gap - the obvious
+    shortcut - produces an almost flat curve and hides the truth, because raising `on` alone does
+    nothing once muting has started: the state persists until the probability falls below `off`.
     """
     hours = len(y) * HOP_S / 3600
     base = int((y == POSITIVE).sum()) * HOP_S / max(hours, 1e-9)
+    grid = (0.5, 0.6, 0.7, 0.8, 0.9, 0.95, 0.98, 0.99)
+    rows = []
+    for on in grid:
+        for off in grid:
+            if off > on:
+                continue
+            muted = policy(p, on, off)
+            heard = int(((y == POSITIVE) & ~muted).sum()) * HOP_S / max(hours, 1e-9)
+            lost = int(((y == 0) & muted).sum()) * HOP_S / max(hours, 1e-9)
+            rows.append((base - heard, lost, on, off, heard))
+
     print()
-    print("OPERATING POINT (same predictions, different thresholds)")
-    print(f"{'on':>6s} {'off':>6s} {'ad-sec heard/h':>15s} {'content-sec lost/h':>19s} "
+    print("OPERATING POINT (same predictions, both thresholds swept)")
+    print(f"{'on':>5s} {'off':>5s} {'ad-sec heard/h':>15s} {'content-sec lost/h':>19s} "
           f"{'saved per lost':>15s}")
-    best = None
-    for on in (0.5, 0.6, 0.7, 0.8, 0.9, 0.95, 0.98, 0.99):
-        off = max(on - gap, 0.02)
-        muted = policy(p, on, off)
-        heard = int(((y == POSITIVE) & ~muted).sum()) * HOP_S / max(hours, 1e-9)
-        lost = int(((y == 0) & muted).sum()) * HOP_S / max(hours, 1e-9)
-        saved = base - heard
-        ratio = saved / max(lost, 1e-9)
-        mark = ""
-        if lost <= 10 and (best is None or saved > best[1]):
-            best, mark = (on, saved), "  <-- meets the <10s/h target"
-        print(f"{on:6.2f} {off:6.2f} {heard:15.0f} {lost:19.0f} {ratio:15.1f}{mark}")
+    for saved, lost, on, off, heard in sorted(rows, key=lambda r: -r[0] / max(r[1], 1e-9))[:6]:
+        print(f"{on:5.2f} {off:5.2f} {heard:15.0f} {lost:19.0f} "
+              f"{saved / max(lost, 1e-9):15.1f}")
     print(f"  (doing nothing: {base:.0f} ad-seconds heard per hour, 0 content lost)")
-    if best:
-        print(f"  At on={best[0]:.2f} the model saves {best[1]:.0f} ad-seconds per hour while")
-        print(f"  staying inside the plan's 10 content-seconds/hour budget.")
-    else:
-        print("  No threshold keeps content loss under 10 s/h. The model is not discriminating")
-        print("  well enough yet for any operating point to be worth switching on.")
+
+    for budget in (10.0, 30.0, 60.0):
+        ok = [r for r in rows if r[1] <= budget]
+        if ok:
+            best = max(ok, key=lambda r: r[0])
+            print(f"  within {budget:.0f} content-seconds/hour: on={best[2]:.2f} off={best[3]:.2f} "
+                  f"saves {best[0]:.0f} ad-seconds/hour")
+            return
+    worst_case = min(rows, key=lambda r: r[1])
+    print(f"  No operating point keeps content loss under 60 s/h - the most conservative setting")
+    print(f"  tried (on={worst_case[2]:.2f} off={worst_case[3]:.2f}) still wrongly mutes "
+          f"{worst_case[1]:.0f} s/h.")
+    print("  This is not a tuning problem. The model is not separating advertising from content")
+    print("  well enough for any threshold to help, and more labelled breaks are what it needs.")
 
 
 def main() -> int:
