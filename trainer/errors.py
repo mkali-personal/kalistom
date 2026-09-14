@@ -88,6 +88,45 @@ def locate(stem: str, dirs: list[Path]) -> Path | None:
     return None
 
 
+def one_recording(name, y, p, dirs, args, totals, worst) -> None:
+    """Writes the two error tracks for a single recording and folds its numbers into `totals`."""
+    muted = policy(p, args.on, args.off)
+    usable = y != DROP                 # a dropped frame had no correct answer, so it has none now
+    masks = {"fp": muted & (y == 0) & usable,
+             "fn": (~muted) & (y == POSITIVE) & usable}
+
+    base = locate(name, dirs)
+    if base is None:
+        print(f"{name:30s} (no .wav found in {', '.join(str(x) for x in dirs)})")
+        return
+
+    counts, secs, adj_secs = {}, {}, {}
+    for kind, mask in masks.items():
+        regions = []
+        for a, b in find_runs(mask):
+            t0, t1 = span_seconds(a, b)
+            if t1 - t0 < args.min_seconds:
+                continue
+            conf = float(p[a:b].mean())
+            gap = distance_to_truth(a, b, y)
+            where = "adj" if gap <= 0.0 else f"+{gap:.0f}s"
+            regions.append((t0, t1, f"{kind.upper()} {t1 - t0:.1f}s p={conf:.2f} {where}"))
+            worst.append((t1 - t0, f"{name} {kind.upper()} {t0 / 60:.1f}-{t1 / 60:.1f} min "
+                                   f"p={conf:.2f} {where}"))
+        write_track(base.with_name(base.name + f".{kind}.txt"), regions)
+        counts[kind] = len(regions)
+        secs[kind] = sum(b - a for a, b, _ in regions)
+        adj_secs[kind] = sum(b - a for a, b, t in regions if t.endswith("adj"))
+
+    total = secs["fp"] + secs["fn"]
+    adj = adj_secs["fp"] + adj_secs["fn"]
+    totals["fp"] += secs["fp"]
+    totals["fn"] += secs["fn"]
+    totals["adj"] += adj
+    print(f"{name:30s} {counts['fp']:5d} {counts['fn']:5d} {secs['fp']:7.0f} {secs['fn']:7.0f}  "
+          f"{(100 * adj / total if total else 0):17.0f}%")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("oof", help=".npz written by train.py --save-oof")
@@ -98,7 +137,7 @@ def main() -> int:
     ap.add_argument("--min-seconds", type=float, default=1.0,
                     help="ignore mistakes shorter than this; a single frame is 0.48 s and a "
                          "track full of them is unreadable")
-    ap.add_argument("--top", type=int, default=4, help="worst mistakes to print per recording")
+    ap.add_argument("--top", type=int, default=12, help="longest mistakes to print")
     args = ap.parse_args()
 
     dirs = [Path(d) for d in args.dir]
@@ -110,70 +149,45 @@ def main() -> int:
           f"{'of which boundary':>18s}")
     print("-" * 82)
 
-    grand_fp = grand_fn = grand_adj = 0.0
+    totals = {"fp": 0.0, "fn": 0.0, "adj": 0.0}
     worst: list[tuple[float, str]] = []
 
     for i, name in enumerate(names):
         m = groups == i
-        y, p = y_all[m], p_all[m]
-        muted = policy(p, args.on, args.off)
-        # A dropped frame had no correct answer when the labels were built and has none now.
-        usable = y != DROP
-        fp_mask = muted & (y == 0) & usable
-        fn_mask = (~muted) & (y == POSITIVE) & usable
-
-        base = locate(str(name), dirs)
-        if base is None:
-            print(f"{name:30s} (no .wav found in {', '.join(str(x) for x in dirs)})")
-            continue
-
-        tracks: dict[str, list[tuple[float, float, str]]] = {"fp": [], "fn": []}
-        stats = {"fp": [0.0, 0.0], "fn": [0.0, 0.0]}     # [seconds, seconds adjacent to truth]
-        skipped = 0
-        for kind, mask in (("fp", fp_mask), ("fn", fn_mask)):
-            for a, b in find_runs(mask):
-                t0, t1 = span_seconds(a, b)
-                if t1 - t0 < args.min_seconds:
-                    skipped += 1
-                    continue
-                conf = float(p[a:b].mean())
-                gap = distance_to_truth(a, b, y)
-                where = "adj" if gap <= 0.0 else f"+{gap:.0f}s"
-                tracks[kind].append((t0, t1, f"{kind.upper()} {t1 - t0:.1f}s p={conf:.2f} {where}"))
-                stats[kind][0] += t1 - t0
-                if gap <= 0.0:
-                    stats[kind][1] += t1 - t0
-                worst.append((t1 - t0, f"{name} {kind.upper()} {t0 / 60:.1f}-{t1 / 60:.1f} min "
-                                       f"p={conf:.2f} {where}"))
-
-        for kind in ("fp", "fn"):
-            write_track(base.with_name(base.name + f".{kind}.txt"), tracks[kind])
-
-        adj = stats["fp"][1] + stats["fn"][1]
-        total = stats["fp"][0] + stats["fn"][0]
-        grand_fp += stats["fp"][0]
-        grand_fn += stats["fn"][0]
-        grand_adj += adj
-        print(f"{name:30s} {len(tracks['fp']):5d} {len(tracks['fn']):5d} "
-              f"{stats['fp'][0]:7.0f} {stats['fn'][0]:7.0f}  "
-              f"{(100 * adj / total if total else 0):17.0f}%")
+        # A fold may hold several recordings of the same broadcast, folded together so none of it
+        # leaks into training. Their frames sit end to end in discover() order, so split them back
+        # apart by frame count - an error track has to line up with an actual file.
+        members = str(name).split(" + ")
+        offsets, cursor = [], 0
+        for mem in members:
+            base = locate(mem, dirs)
+            n_f = (base.with_name(base.name + ".f16").stat().st_size // 2048) if base else 0
+            offsets.append((mem, cursor, cursor + n_f))
+            cursor += n_f
+        if len(members) > 1 and cursor == int(m.sum()):
+            rows = np.flatnonzero(m)
+            for mem, a, b in offsets:
+                one_recording(mem, y_all[rows[a:b]], p_all[rows[a:b]], dirs, args, totals, worst)
+        else:
+            one_recording(str(name), y_all[m], p_all[m], dirs, args, totals, worst)
 
     print("-" * 82)
-    tot = grand_fp + grand_fn
-    print(f"{'TOTAL':30s} {'':5s} {'':5s} {grand_fp:7.0f} {grand_fn:7.0f}  "
-          f"{(100 * grand_adj / tot if tot else 0):17.0f}%")
+    tot = totals["fp"] + totals["fn"]
+    print(f"{'TOTAL':30s} {'':5s} {'':5s} {totals['fp']:7.0f} {totals['fn']:7.0f}  "
+          f"{(100 * totals['adj'] / tot if tot else 0):17.0f}%")
     print()
-    print(f"{grand_adj / 60:.1f} of {tot / 60:.1f} error-minutes touch a real break, so that "
-          f"share is a boundary")
-    print("question rather than a detection one - check those against the audio before concluding")
-    print("anything about the model.")
+    print(f"{totals['adj'] / 60:.1f} of {tot / 60:.1f} error-minutes touch a real break, so that")
+    print("share is a boundary question rather than a detection one - check those against the")
+    print("audio before concluding anything about the model.")
 
     if worst:
-        print(f"\nLongest mistakes, listen to these first:")
-        for secs, desc in sorted(worst, reverse=True)[:args.top * 3]:
+        print()
+        print("Longest mistakes, listen to these first:")
+        for secs, desc in sorted(worst, reverse=True)[:args.top]:
             print(f"  {secs:6.1f}s  {desc}")
 
-    print(f"\nWrote <stem>.fp.txt and <stem>.fn.txt beside each recording.")
+    print()
+    print("Wrote <stem>.fp.txt and <stem>.fn.txt beside each recording.")
     print("In Audacity: open the .wav, then File > Import > Labels three times - the ground truth")
     print("track, the .fp.txt and the .fn.txt - and each mistake becomes a region you can play.")
     return 0
