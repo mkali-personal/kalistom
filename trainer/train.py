@@ -39,6 +39,7 @@ from labels import DROP, HOP_S, POSITIVE, frame_labels, read_points, read_spans,
 from rectime import describe, in_hours, parse_window, started_at
 
 EMBEDDING_DIM = 1024
+MIN_SAME_BROADCAST_S = 30.0   # shorter than this is two recordings abutting, not one broadcast
 
 
 def load_embeddings(path: Path) -> np.ndarray:
@@ -92,6 +93,41 @@ def discover(d: Path) -> list[tuple[Path, Path, Path, Path | None]]:
                 out.append((stem, emb, lab, joins if joins.exists() else None))
                 break
     return out
+
+
+def overlap_groups(recs, spans) -> list[int]:
+    """Fold assignment that keeps recordings of the SAME broadcast together.
+
+    Leave-one-recording-out is only honest if the held-out recording's audio appears nowhere in
+    the training half. That stops being true the moment the same broadcast is captured twice - the
+    phone session of 2026-09-14 08:46-09:28 covers the same half hour as two desktop recordings,
+    because the desktop recorder was running at the time. Holding out the phone session while its
+    own audio sits in training, arriving by a different route, would measure nothing and would
+    look excellent doing it.
+
+    So recordings whose wall-clock ranges intersect share a fold.
+    """
+    n = len(recs)
+    parent = list(range(n))
+
+    def find(a):
+        while parent[a] != a:
+            parent[a] = parent[parent[a]]
+            a = parent[a]
+        return a
+
+    for i in range(n):
+        for j in range(i + 1, n):
+            (a0, a1), (b0, b1) = spans[i], spans[j]
+            if a0 is None or b0 is None:
+                continue
+            # Consecutive stitched runs abut, and frame-count rounding can make one appear to
+            # start a fraction of a second before the previous ended. That is adjacency, not the
+            # same broadcast twice, so require a real overlap before folding them together.
+            if (min(a1, b1) - max(a0, b0)).total_seconds() > MIN_SAME_BROADCAST_S:
+                parent[find(i)] = find(j)
+    roots = {}
+    return [roots.setdefault(find(i), len(roots)) for i in range(n)]
 
 
 def frame_mid(start, emb_path: Path):
@@ -405,11 +441,33 @@ def main() -> int:
 
     keep = y != DROP
     if len(recs) > 1:
+        from datetime import timedelta
+        spans = []
+        for _, embp, _, _ in recs:
+            t = started_at(embp)
+            n_f = embp.stat().st_size // (EMBEDDING_DIM * 2)
+            spans.append((None, None) if t is None
+                         else (t, t + timedelta(seconds=n_f * HOP_S)))
+        grp = overlap_groups(recs, spans)
+        n_groups = len(recs)
+        if len(set(grp)) < len(recs):
+            merged = {}
+            for i, g in enumerate(grp):
+                merged.setdefault(g, []).append(names[i])
+            for g, members in merged.items():
+                if len(members) > 1:
+                    print(f"  same broadcast, folded together: {', '.join(members)}")
+            groups = np.array([grp[g] for g in groups])
+            names = [" + ".join(m) for _, m in sorted(merged.items())]
+            # The fold count follows the groups, not the recordings. Without this the loop runs
+            # one fold per recording while `names` has one per group, and walks off the end.
+            n_groups = len(merged)
+    if len(recs) > 1:
         # Hold out whole recordings. Blocks within one recording still share the same ad break,
         # the same presenters and the same hour of broadcast; only a different recording tests
         # whether anything was learnt beyond that.
         fold = groups
-        n_folds = len(recs)
+        n_folds = n_groups
         print(f"\nsplit: leave-one-recording-out ({n_folds} folds)")
     else:
         fold = blocks(len(y), max(int(args.block_seconds / HOP_S), 1), args.folds)
