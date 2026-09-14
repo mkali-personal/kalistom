@@ -272,8 +272,12 @@ def sweep(y: np.ndarray, p: np.ndarray, gap: float = 0.0) -> None:
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--dir", default="", help="train on every labelled recording in this "
-                                              "directory, holding out one recording at a time")
+    # default=None, not "": with action="append" argparse appends to whatever the default is,
+    # and appending to a string raises rather than doing anything useful.
+    ap.add_argument("--dir", default=None, action="append",
+                    help="train on every labelled recording in this directory, holding out one "
+                         "recording at a time. Repeat the flag to pool several directories - "
+                         "desktop-stitched recordings and phone sessions live in different ones")
     ap.add_argument("--emb", default="", help="single recording: the .f16 embeddings")
     ap.add_argument("--labels", default="", help="single recording: Audacity label track")
     ap.add_argument("--joins", default="", help="join markers from stitch.py")
@@ -292,10 +296,10 @@ def main() -> int:
     args = ap.parse_args()
 
     if args.dir:
-        recs = discover(Path(args.dir))
+        recs = [r for d in args.dir for r in discover(Path(d))]
         if not recs:
-            print(f"nothing labelled in {args.dir} - each recording needs a .f16 and one of "
-                  f"{', '.join(LABEL_ORDER)}")
+            print(f"nothing labelled in {', '.join(args.dir)} - each recording needs a .f16 "
+                  f"and one of {', '.join(LABEL_ORDER)}")
             return 1
     else:
         recs = [(Path(args.emb).with_suffix(""), Path(args.emb), Path(args.labels),
