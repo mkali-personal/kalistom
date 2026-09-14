@@ -311,3 +311,27 @@ consistently. Those have opposite remedies, and nothing in the data distinguishe
 their error has never been measured. Marking one recording by hand, without looking at the draft
 first, and running `trainer/compare_labels.py` would settle both the general question and this
 specific one.
+
+### Density by period, with evening and late-night added (2026-09-14)
+
+The pool is now 19.2 h. Adding Friday evening and Saturday afternoon corrects the earlier picture,
+which only ever saw midnight to midday:
+
+| Period | Hours | Breaks | Per hour |
+|---|---|---|---|
+| 00:30-05:30 night | 4.92 | 2 | 0.41 |
+| 05:30-07:30 early | 2.00 | 7 | 3.50 |
+| 07:30-12:10 morning | 5.60 | 23 | **4.11** |
+| 12:10-17:00 afternoon | 0.69 | 0 | 0.00 |
+| 17:00-21:00 evening | 2.67 | 5 | 1.87 |
+| 21:00-00:30 late | 3.33 | 10 | 3.01 |
+| total | 19.21 | 47 | 2.45 |
+
+**The morning is still the best hour to record**, and by more than expected: early evening turns
+out to carry less than half the morning's density, not the comparable amount that "drive time"
+would suggest. Late evening, 21:00 to 00:30, is the surprise - nearly as dense as the early
+morning.
+
+The afternoon figure is not evidence of anything: those 41 minutes are a Friday afternoon before
+Shabbat, when this station's advertising stops, and no ordinary weekday afternoon has been recorded
+at all. It should be read as a gap in the sample rather than a measurement.

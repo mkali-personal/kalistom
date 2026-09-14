@@ -168,8 +168,9 @@ def cmd_summary(args) -> int:
     print(f"{hours_all:.2f} h of audio, {per_hour:.2f} break(s) per hour")
     print()
     print("A file with zero hits is usually a real answer rather than a failure. Measured over")
-    print("11.72 h of this station on 2026-09-10: 4.29 breaks/hour between 07:30 and 12:10,")
-    print("3.50 between 05:30 and 07:30, and 0.41 between 00:30 and 05:30. Record daytime.")
+    print("19.2 h of this station: 4.11 breaks/hour from 07:30 to 12:10, 3.50 from 05:30 to")
+    print("07:30, 3.01 from 21:00 to 00:30, 1.87 from 17:00 to 21:00, and 0.41 overnight.")
+    print("The morning is worth twice the early evening and ten times the small hours.")
     return 0
 
 
