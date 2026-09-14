@@ -36,6 +36,7 @@ from pathlib import Path
 import numpy as np
 
 from labels import DROP, HOP_S, POSITIVE, frame_labels, read_points, read_spans, summarise
+from rectime import describe, in_hours, parse_window, started_at
 
 EMBEDDING_DIM = 1024
 
@@ -91,6 +92,13 @@ def discover(d: Path) -> list[tuple[Path, Path, Path, Path | None]]:
                 out.append((stem, emb, lab, joins if joins.exists() else None))
                 break
     return out
+
+
+def frame_mid(start, emb_path: Path):
+    """Midpoint of a recording, from the embedding file's size - no need to open the audio."""
+    from datetime import timedelta
+    frames = emb_path.stat().st_size // (EMBEDDING_DIM * 2)
+    return start + timedelta(seconds=frames * HOP_S / 2)
 
 
 class Projection:
@@ -283,6 +291,14 @@ def main() -> int:
     ap.add_argument("--joins", default="", help="join markers from stitch.py")
     ap.add_argument("--meta", default="", help=".jsonl beside the embeddings (for rms)")
     ap.add_argument("--context", type=int, default=10, help="frames of context per row")
+    ap.add_argument("--list", action="store_true",
+                    help="show which recordings would be used, with their times, and stop")
+    ap.add_argument("--hours", default="", metavar="HH-HH",
+                    help="keep only recordings whose midpoint falls in this local-time window, "
+                         "e.g. 06-23. Windows may wrap midnight: 23-06 means the small hours")
+    ap.add_argument("--exclude-hours", default="", metavar="HH-HH",
+                    help="the opposite: drop recordings whose midpoint falls in the window, "
+                         "e.g. --exclude-hours 00:30-05:30 to leave out the dead of night")
     ap.add_argument("--pca", type=int, default=0,
                     help="project onto this many principal components first (0 = no projection)")
     ap.add_argument("--l2", type=float, default=1e-3)
@@ -305,16 +321,55 @@ def main() -> int:
         recs = [(Path(args.emb).with_suffix(""), Path(args.emb), Path(args.labels),
                  Path(args.joins) if args.joins else None)]
 
+    # Time-of-day filtering, by the midpoint rather than the start: a half-hour recording that
+    # begins at 05:50 is mostly daytime, and calling it night because of its first ten minutes
+    # would be the wrong answer.
+    keep_win = parse_window(args.hours) if args.hours else None
+    drop_win = parse_window(args.exclude_hours) if args.exclude_hours else None
+    if keep_win or drop_win:
+        kept = []
+        for r in recs:
+            t = started_at(r[1])
+            mid = t if t is None else frame_mid(t, r[1])
+            if t is None:
+                print(f"  keeping {r[0].name}: no timestamp to filter on")
+                kept.append(r)
+                continue
+            if keep_win and not in_hours(mid, *keep_win):
+                print(f"  dropped {r[0].name} ({mid:%H:%M}) - outside {args.hours}")
+                continue
+            if drop_win and in_hours(mid, *drop_win):
+                print(f"  dropped {r[0].name} ({mid:%H:%M}) - inside {args.exclude_hours}")
+                continue
+            kept.append(r)
+        recs = kept
+        print(f"{len(recs)} recording(s) left after the time filter")
+        print()
+        if not recs:
+            return 1
+
     parts_X, parts_y, parts_g, names = [], [], [], []
     total_spans = 0
-    print(f"{'recording':28s} {'min':>6s} {'breaks':>7s} {'ad frames':>10s}")
+    print(f"{'recording':28s} {'when':>17s} {'min':>6s} {'breaks':>7s} {'ad frames':>10s}")
     for i, (stem, embp, labp, joinp) in enumerate(recs):
-        emb = load_embeddings(embp)
-        rms = load_rms(embp.with_suffix(".jsonl"))
+        n_frames = embp.stat().st_size // (EMBEDDING_DIM * 2)
         spans = read_spans(labp)
         joins = read_points(joinp) if joinp and joinp.exists() else []
-        yi = frame_labels(len(emb), spans, joins)
         total_spans += len(spans)
+        if args.list:
+            # Reading 40 MB of embeddings to print one line would make --list as slow as the
+            # thing it exists to avoid; the frame count is in the file size.
+            yi = frame_labels(n_frames, spans, joins)
+            parts_y.append(yi)
+            names.append(stem.name)
+            print(f"{stem.name:28s} {describe(embp, n_frames * HOP_S):>17s} "
+                  f"{n_frames * HOP_S / 60:6.1f} {len(spans):7d} "
+                  f"{int((yi == POSITIVE).sum()):10d}")
+            continue
+
+        emb = load_embeddings(embp)
+        rms = load_rms(embp.with_suffix(".jsonl"))
+        yi = frame_labels(len(emb), spans, joins)
 
         Xi = emb
         if rms is not None and len(rms) == len(emb):
@@ -324,8 +379,15 @@ def main() -> int:
         parts_y.append(yi)
         parts_g.append(np.full(len(yi), i, dtype=np.int32))
         names.append(stem.name)
-        print(f"{stem.name:28s} {len(emb) * HOP_S / 60:6.1f} {len(spans):7d} "
-              f"{int((yi == POSITIVE).sum()):10d}   [{labp.name}]")
+        print(f"{stem.name:28s} {describe(embp, len(emb) * HOP_S):>17s} "
+              f"{len(emb) * HOP_S / 60:6.1f} {len(spans):7d} "
+              f"{int((yi == POSITIVE).sum()):10d}")
+
+    if args.list:
+        print()
+        print(f"{total_spans} ad span(s) across {len(recs)} recording(s), "
+              f"{sum(len(v) for v in parts_y) * HOP_S / 3600:.2f} h")
+        return 0
 
     X = np.vstack(parts_X)
     y = np.concatenate(parts_y)

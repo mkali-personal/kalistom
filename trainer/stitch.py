@@ -33,10 +33,15 @@ from __future__ import annotations
 import argparse
 import json
 import struct
+import sys
 import wave
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
 import numpy as np
+
+from rectime import started_at
 
 SR = 16000
 PROBE_SEC = 0.25       # verbatim probe taken from the head of the next segment
@@ -111,8 +116,13 @@ class Run:
         if self.dry:
             return
         self.w.close()
+        # The start time goes in the manifest as well as the filename. Time of day decides what
+        # is worth labelling on this station - roughly ten times the ad density at 11:00 as at
+        # 03:00 - so it should not depend on a filename surviving every copy and move.
+        started = started_at(self.path)
         self.path.with_suffix(".json").write_text(json.dumps({
             "source": "desktop stream, stitched",
+            "started_local": None if started is None else started.isoformat(timespec="seconds"),
             "sample_rate": SR,
             "seconds": round(self.samples / SR, 3),
             "continues_previous": self.continues,
