@@ -1,0 +1,92 @@
+{
+  "source": "desktop stream, stitched",
+  "sample_rate": 16000,
+  "seconds": 2167.979,
+  "continues_previous": true,
+  "parts": [
+    {
+      "file": "desk_20260910_215626.wav",
+      "out_offset_s": 0.0,
+      "seconds": 59.989,
+      "trimmed_s": 0.0,
+      "gap_before_s": null
+    },
+    {
+      "file": "desk_20260910_215724.wav",
+      "out_offset_s": 59.989,
+      "seconds": 364.011,
+      "trimmed_s": 0.0,
+      "gap_before_s": 2.48
+    },
+    {
+      "file": "desk_20260910_220331.wav",
+      "out_offset_s": 424.0,
+      "seconds": 56.0,
+      "trimmed_s": 0.0,
+      "gap_before_s": 1.0
+    },
+    {
+      "file": "desk_20260910_220428.wav",
+      "out_offset_s": 480.0,
+      "seconds": 80.0,
+      "trimmed_s": 0.0,
+      "gap_before_s": 1.97
+    },
+    {
+      "file": "desk_20260910_220551.wav",
+      "out_offset_s": 560.0,
+      "seconds": 280.0,
+      "trimmed_s": 0.0,
+      "gap_before_s": 4.92
+    },
+    {
+      "file": "desk_20260910_221035.wav",
+      "out_offset_s": 840.0,
+      "seconds": 56.0,
+      "trimmed_s": 0.0,
+      "gap_before_s": 1.01
+    },
+    {
+      "file": "desk_20260910_221132.wav",
+      "out_offset_s": 896.0,
+      "seconds": 256.0,
+      "trimmed_s": 0.0,
+      "gap_before_s": 2.21
+    },
+    {
+      "file": "desk_20260910_221551.wav",
+      "out_offset_s": 1152.0,
+      "seconds": 104.0,
+      "trimmed_s": 0.0,
+      "gap_before_s": 3.58
+    },
+    {
+      "file": "desk_20260910_221738.wav",
+      "out_offset_s": 1256.0,
+      "seconds": 59.989,
+      "trimmed_s": 0.0,
+      "gap_before_s": -0.98
+    },
+    {
+      "file": "desk_20260910_221837.wav",
+      "out_offset_s": 1315.989,
+      "seconds": 364.011,
+      "trimmed_s": 0.0,
+      "gap_before_s": 1.17
+    },
+    {
+      "file": "desk_20260910_222442.wav",
+      "out_offset_s": 1680.0,
+      "seconds": 59.989,
+      "trimmed_s": 0.0,
+      "gap_before_s": -1.0
+    },
+    {
+      "file": "desk_20260910_222541.wav",
+      "out_offset_s": 1739.989,
+      "seconds": 427.989,
+      "trimmed_s": 0.0,
+      "gap_before_s": -3.59
+    }
+  ]
+}

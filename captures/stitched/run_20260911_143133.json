@@ -1,0 +1,22 @@
+{
+  "source": "desktop stream, stitched",
+  "sample_rate": 16000,
+  "seconds": 560.0,
+  "continues_previous": true,
+  "parts": [
+    {
+      "file": "desk_20260911_143133.wav",
+      "out_offset_s": 0.0,
+      "seconds": 195.989,
+      "trimmed_s": 0.0,
+      "gap_before_s": null
+    },
+    {
+      "file": "desk_20260911_143449.wav",
+      "out_offset_s": 195.989,
+      "seconds": 364.011,
+      "trimmed_s": 0.0,
+      "gap_before_s": 1.67
+    }
+  ]
+}
