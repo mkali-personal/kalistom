@@ -335,3 +335,35 @@ morning.
 The afternoon figure is not evidence of anything: those 41 minutes are a Friday afternoon before
 Shabbat, when this station's advertising stops, and no ordinary weekday afternoon has been recorded
 at all. It should be read as a gap in the sample rather than a measurement.
+
+## Training narrowly on the listening hours makes it worse (2026-09-16)
+
+The app only has to work on the morning shows, so the obvious move was to train only on them:
+07:00-11:00, 10 recordings, 30 breaks, 5.56 h against the full pool's 22 / 58 / 11.71 h. The
+hypothesis was that evening and liturgical programming was poisoning the model, since
+`errors.py` had shown it confidently muting a Naomi Shemer song in the 21:25 recording, and 31 %
+of its isolated false positives fell on stretches with no speech at all.
+
+Judged on its own folds the narrow model looks better - 85.4 % precision and 92.6 % recall against
+78.4 % / 89.8 %. That comparison is worthless: it is an easier test set, not a better model.
+
+Both models produce out-of-fold predictions, so each can be scored on **the same** 5.56 h of
+morning audio:
+
+| trained on | saves ad-sec/h | loses content-sec/h | ratio |
+|---|---|---|---|
+| all 22 recordings | 320 | **12** | **26.1** |
+| the morning 10 only | 391 | 32 | 12.4 |
+
+**Narrowing the training set halves the trade and triples the content lost.** The evening and
+music-heavy recordings are not noise to be excluded - they are what teaches the model that music
+is not automatically advertising. Remove them and it over-fires on anything musical, including
+the jingle-like passages inside the morning shows themselves.
+
+The corollary is the useful one. The full-pool model, judged only on the hours actually listened
+to, loses **12 content-seconds per hour** while removing 320 of roughly 540 ad-seconds - against a
+plan budget of 10, and against the 34 s/h it scores across the whole broadcast day. The day
+includes programming that will never be playing at 08:00.
+
+**Train on everything; evaluate on the hours that matter.** Breadth belongs in the data, narrowness
+in the judgement.
