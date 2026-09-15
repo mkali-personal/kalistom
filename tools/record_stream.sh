@@ -16,10 +16,23 @@
 #
 # Usage:
 #   tools/record_stream.sh [hours] [out_dir]
-#   tools/record_stream.sh 8            # record overnight into captures/desktop
+#   tools/record_stream.sh 8                    # record 8 h starting now
+#   tools/record_stream.sh --at 07:00 4         # sleep until the next 07:00, then record 4 h
+#
+# --at exists so the morning programme is captured whether or not anyone is awake to start it.
+# The end time is absolute: ask for 07:00 and four hours and you get 07:00-11:00, so a machine
+# that suspends past the start records the remainder rather than sliding the window to 09:00.
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+AT=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --at) AT="$2"; shift 2 ;;
+    --at=*) AT="${1#--at=}"; shift ;;
+    *) break ;;
+  esac
+done
 HOURS="${1:-8}"
 OUT="${2:-$ROOT/captures/desktop}"
 SEGMENT_MIN="${SEGMENT_MIN:-30}"
@@ -33,9 +46,47 @@ mkdir -p "$OUT"
 
 total=$(python -c "print(int(float('$HOURS')*3600))")
 seg=$(( SEGMENT_MIN * 60 ))
-deadline=$(( $(date +%s) + total ))
 
-echo "recording ${HOURS}h into $OUT"
+if [ -n "$AT" ]; then
+  # The next occurrence of HH:MM, today if it is still ahead of us and tomorrow otherwise.
+  start=$(python -c "
+import datetime, sys
+hh, mm = (sys.argv[1].split(':') + ['0'])[:2]
+now = datetime.datetime.now()
+t = now.replace(hour=int(hh), minute=int(mm), second=0, microsecond=0)
+if t <= now:
+    t += datetime.timedelta(days=1)
+print(int(t.timestamp()))" "$AT")
+  deadline=$(( start + total ))
+  echo "waiting until $(date -d "@$start" '+%a %H:%M' 2>/dev/null || echo "$AT") to record ${HOURS}h into $OUT"
+  echo "the machine must stay awake until then - check that sleep and hibernate are off"
+  echo
+  while :; do
+    now=$(date +%s)
+    left=$(( start - now ))
+    [ "$left" -le 0 ] && break
+    # Print a countdown once a minute so it is obvious this is alive and not wedged, and sleep in
+    # short steps so a laptop that suspends and resumes notices quickly rather than an hour late.
+    if [ $(( left % 60 )) -lt 20 ] || [ "$left" -lt 60 ]; then
+      printf "  %02d:%02d:%02d until %s   " $(( left/3600 )) $(( left%3600/60 )) $(( left%60 )) "$AT"
+    fi
+    sleep $(( left < 15 ? left : 15 ))
+  done
+  echo
+  # The deadline is absolute, not "now plus HOURS". If the machine slept through the start time we
+  # record whatever is left of the window rather than sliding the whole thing later - the point of
+  # asking for 07:00 is to capture the 07:00 programme, not to capture some h hours.
+  now=$(date +%s)
+  if [ "$now" -ge "$deadline" ]; then
+    echo "the $AT window has already passed; nothing to record"
+    exit 0
+  fi
+  [ $(( now - start )) -gt 60 ] &&     echo "starting $(( (now - start) / 60 )) min late - recording the rest of the window"
+else
+  deadline=$(( $(date +%s) + total ))
+fi
+
+echo "recording until $(date -d "@$deadline" '+%H:%M' 2>/dev/null || echo "+${HOURS}h") into $OUT"
 echo "segments of ${SEGMENT_MIN} min, 16 kHz mono, restarting on early exit"
 echo
 
@@ -60,11 +111,15 @@ while :; do
     continue
   fi
 
+  # cygpath first: the path here is an MSYS /c/... one, which Windows Python cannot open, so this
+  # check silently reported 0 s for every segment and the log claimed a short segment every time.
+  # ffmpeg was never affected - Git Bash converts a bare argument, but not one inside a quoted
+  # string.
   got=$(python -c "
 import wave,sys
 try:
-    w=wave.open(r'$f','rb'); print(int(w.getnframes()/w.getframerate()))
-except Exception: print(0)")
+    w=wave.open(sys.argv[1],'rb'); print(int(w.getnframes()/w.getframerate()))
+except Exception: print(0)" "$(cygpath -w "$f" 2>/dev/null || echo "$f")")
 
   if [ "$got" -lt $(( want * 9 / 10 )) ]; then
     short=$(( short + 1 ))

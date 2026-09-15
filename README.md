@@ -44,8 +44,14 @@ no Python packages, no model, no Android SDK.
 ```bash
 git clone https://github.com/mkali-personal/kalistom.git
 cd kalistom
-tools/record_stream.sh 8                       # 8 hours into captures/desktop
+tools/record_stream.sh 8                       # 8 hours starting now
+tools/record_stream.sh --at 07:00 4            # sleep until the next 07:00, then record 07:00-11:00
 ```
+
+`--at` waits for the next occurrence of that time - today if it is still ahead, tomorrow
+otherwise - so the morning programme is captured whether or not anyone is awake to start it. The
+end time is absolute: `--at 07:00 4` means 07:00 to 11:00, so a machine that suspends past the
+start records the remainder rather than sliding the whole window later.
 
 Check first that the machine will not sleep, hibernate or install updates overnight. A machine
 that suspends at 2 a.m. leaves you a broken final segment and nothing after it, and you will not
