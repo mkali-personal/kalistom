@@ -34,11 +34,28 @@ HOP_S = 0.48
 
 
 def started_at(path: str | Path) -> datetime | None:
-    """Local wall-clock time the recording began, or None if the name carries no stamp.
+    """Local wall-clock time the *content* was broadcast, or None if nothing says.
 
-    A phone session's .jsonl header wins over its filename when both exist.
+    Three sources, in order:
+
+      <stem>.broadcast.json   an explicit override, when the two differ
+      <stem>.jsonl            "started_utc", written by the phone when the session opened
+      the filename            desk_/run_/sess_ + YYYYMMDD_HHMMSS, local time
+
+    The override exists because *recorded at* and *broadcast at* are not the same thing. A phone
+    session captures whatever the app is playing, and the listener may have scrolled back: the
+    2026-09-14 session was recorded from 08:46 but plays the broadcast from 08:00. Everything
+    that reasons about time here - which hours to train on, whether two recordings are the same
+    broadcast - cares about when the audio went out, not when we happened to catch it.
     """
     p = Path(path)
+    override = p.with_name(p.stem + ".broadcast.json")
+    if override.exists():
+        try:
+            return datetime.fromisoformat(
+                json.loads(override.read_text(encoding="utf-8"))["content_started_local"])
+        except Exception:                                       # noqa: BLE001
+            pass
     meta = p.with_suffix(".jsonl")
     if meta.exists():
         try:

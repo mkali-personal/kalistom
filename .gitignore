@@ -12,6 +12,7 @@ captures/**
 !captures/**/*.truth.txt
 !captures/**/*.gemini.txt
 !captures/**/*.claude.txt
+!captures/**/*.broadcast.json
 !captures/**/*.joins.txt
 !captures/**/*.markers.txt
 !captures/**/*.transcript.txt

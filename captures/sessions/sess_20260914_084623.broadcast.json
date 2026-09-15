@@ -1,0 +1,5 @@
+{
+  "content_started_local": "2026-09-14T08:00:00+03:00",
+  "recorded_started_local": "2026-09-14T08:46:23+03:00",
+  "why": "Listener scrolled back in the Kan app, so the session plays the 08:00 broadcast rather than the 08:46 one. Reported by the user 2026-09-15; without this the session looks like the same broadcast as run_20260914_084349 and is wrongly folded together with it."
+}
