@@ -48,7 +48,9 @@ def load_embeddings(path: Path) -> np.ndarray:
     if raw.size % EMBEDDING_DIM:
         raise SystemExit(f"{path.name}: {raw.size} values is not a whole number of "
                          f"{EMBEDDING_DIM}-d frames")
-    return raw.reshape(-1, EMBEDDING_DIM).astype(np.float32)
+    # Left as float16, the precision the phone actually wrote. Upcasting here doubles a design
+    # matrix that is already the largest thing in the process and adds no information whatsoever.
+    return raw.reshape(-1, EMBEDDING_DIM)
 
 
 def load_rms(path: Path) -> np.ndarray | None:
@@ -137,32 +139,31 @@ def frame_mid(start, emb_path: Path):
     return start + timedelta(seconds=frames * HOP_S / 2)
 
 
-class Projection:
-    """Standardisation, and optionally a PCA down to `dim` components.
+CHUNK = 4000          # rows per pass; 4000 x 10250 float32 is about 160 MB
 
-    Fitted on training rows only, and used for both halves of a fold. The dimensionality is the
-    point: 10 frames of a 1024-d embedding is 10,250 features, against roughly 13,700 usable rows,
-    so plain logistic regression has enough freedom to memorise the training set outright - which
-    it demonstrably does, scoring a perfect fit. Projecting onto the leading components first is
-    the cheapest honest way to take that freedom away.
+
+def chunk_ranges(n: int):
+    for a in range(0, n, CHUNK):
+        yield a, min(a + CHUNK, n)
+
+
+def mean_std(X: np.ndarray, idx: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Column means and standard deviations over `idx`, in chunks.
+
+    X.mean(0) on a boolean-indexed slice would first materialise that slice - several gigabytes
+    for a copy that is read once and thrown away. This walks it instead.
     """
-
-    def __init__(self, X: np.ndarray, dim: int):
-        self.mu = X.mean(0)
-        self.sd = X.std(0) + 1e-6
-        self.basis = None
-        if dim and dim < X.shape[1]:
-            Z = (X - self.mu) / self.sd
-            # Randomised range-finder: full SVD of a 13k x 10k matrix is not worth the wait.
-            rng = np.random.default_rng(0)
-            Q, _ = np.linalg.qr(Z.T @ (Z @ rng.standard_normal((Z.shape[1], dim + 10),
-                                                               dtype=np.float32)))
-            _, _, Vt = np.linalg.svd((Z @ Q), full_matrices=False)
-            self.basis = (Q @ Vt.T[:, :dim]).astype(np.float32)
-
-    def apply(self, X: np.ndarray) -> np.ndarray:
-        Z = (X - self.mu) / self.sd
-        return Z if self.basis is None else Z @ self.basis
+    d = X.shape[1]
+    s = np.zeros(d, np.float64)
+    ss = np.zeros(d, np.float64)
+    for a, b in chunk_ranges(len(idx)):
+        z = X[idx[a:b]].astype(np.float32)
+        s += z.sum(0, dtype=np.float64)
+        ss += np.einsum("ij,ij->j", z, z, dtype=np.float64)
+    n = max(len(idx), 1)
+    mu = s / n
+    sd = np.sqrt(np.maximum(ss / n - mu ** 2, 0.0)) + 1e-6
+    return mu.astype(np.float32), sd.astype(np.float32)
 
 
 def blocks(n: int, block_frames: int, folds: int) -> np.ndarray:
@@ -170,47 +171,57 @@ def blocks(n: int, block_frames: int, folds: int) -> np.ndarray:
     return (np.arange(n) // block_frames) % folds
 
 
-def fit(X: np.ndarray, y: np.ndarray, l2: float, iters: int) -> np.ndarray:
-    """Class-balanced logistic regression, solved with L-BFGS.
+def fit(X, idx, y, mu, sd, l2: float, iters: int) -> np.ndarray:
+    """Class-balanced logistic regression over the rows `idx`, solved with L-BFGS.
 
-    Written out rather than pulled from sklearn so the weights are plainly ours to ship to the
-    phone as JSON. Fixed-step gradient descent did the same job but needed thousands of passes
-    over the design matrix, which is minutes per fold once there are tens of thousands of rows;
-    L-BFGS gets there in a couple of hundred.
+    Never materialises the training rows. The loss, the probabilities and the gradient are all
+    accumulated in one chunked pass, which is possible because the residual is elementwise in the
+    scores: a chunk's contribution to X.T @ r needs only that chunk's own rows. Standardisation
+    happens per chunk from `mu`/`sd` fitted on the training rows alone.
 
-    The bias is carried separately rather than by appending a column of ones. That column would
-    copy the entire design matrix - close to two gigabytes here - on every call.
+    The design matrix is 131,000 x 10,250 here. Copying it per fold, as an earlier version did in
+    X[tr] and again in the projection, needed 21 GB and the operating system killed the process.
     """
     from scipy.optimize import minimize                    # imported late; only this needs it
 
-    n, d = X.shape
+    n, d = len(idx), X.shape[1]
+    inv_sd = (1.0 / sd).astype(np.float32)
     pos, neg = max((y == 1).sum(), 1), max((y == 0).sum(), 1)
     sw = np.where(y == 1, 0.5 / pos, 0.5 / neg).astype(np.float64) * n
 
     def loss_grad(w):
-        # The two matrix products stay in float32. Letting a float64 vector meet a float32 matrix
-        # makes numpy promote the whole matrix, which would double an already large allocation.
         w32 = w.astype(np.float32)
-        z = np.clip(X @ w32[:d] + w32[d], -30, 30).astype(np.float64)
-        p = 1.0 / (1.0 + np.exp(-z))
-        # Weighted cross-entropy, plus L2 on the weights but never on the bias: penalising the
-        # bias would drag the decision threshold towards the majority class for no good reason.
-        ll = float(np.sum(sw * (np.logaddexp(0, z) - y * z)) / n)
-        r = (sw * (p - y) / n).astype(np.float32)
-        g = np.empty_like(w)
-        g[:d] = X.T @ r + l2 * w[:d]
-        g[d] = float(r.sum())
+        ww, bias = w32[:d], float(w32[d])
+        ll = 0.0
+        g = np.zeros(d + 1, np.float64)
+        for a, b in chunk_ranges(n):
+            z = (X[idx[a:b]].astype(np.float32) - mu) * inv_sd
+            sc = np.clip(z @ ww + bias, -30, 30).astype(np.float64)
+            yc, swc = y[a:b], sw[a:b]
+            ll += float(np.sum(swc * (np.logaddexp(0, sc) - yc * sc)))
+            r = (swc * (1.0 / (1.0 + np.exp(-sc)) - yc)).astype(np.float32)
+            g[:d] += z.T @ r
+            g[d] += float(r.sum())
+        ll /= n
+        g /= n
+        g[:d] += l2 * w[:d]
         return ll + 0.5 * l2 * float(w[:d] @ w[:d]), g
 
-    w0 = np.zeros(d + 1, dtype=np.float64)
-    res = minimize(loss_grad, w0, jac=True, method="L-BFGS-B",
+    res = minimize(loss_grad, np.zeros(d + 1), jac=True, method="L-BFGS-B",
                    options={"maxiter": iters, "maxcor": 20})
     return res.x.astype(np.float32)
 
 
-def predict(X: np.ndarray, w: np.ndarray) -> np.ndarray:
+def predict(X, idx, w, mu, sd) -> np.ndarray:
+    """Probabilities for rows `idx`, chunked for the same reason."""
     d = X.shape[1]
-    return 1.0 / (1.0 + np.exp(-np.clip(X @ w[:d] + w[d], -30, 30)))
+    inv_sd = (1.0 / sd).astype(np.float32)
+    ww, bias = w[:d].astype(np.float32), float(w[d])
+    out = np.empty(len(idx), np.float32)
+    for a, b in chunk_ranges(len(idx)):
+        z = (X[idx[a:b]].astype(np.float32) - mu) * inv_sd
+        out[a:b] = 1.0 / (1.0 + np.exp(-np.clip(z @ ww + bias, -30, 30)))
+    return out
 
 
 def policy(p: np.ndarray, on: float, off: float) -> np.ndarray:
@@ -425,10 +436,16 @@ def main() -> int:
               f"{sum(len(v) for v in parts_y) * HOP_S / 3600:.2f} h")
         return 0
 
-    X = np.vstack(parts_X)
+    # Filled in place rather than np.vstack'd. vstack allocates the whole result while every part
+    # is still alive, which doubles the peak for a matrix that is already the largest object here.
     y = np.concatenate(parts_y)
     groups = np.concatenate(parts_g)
-    del parts_X
+    X = np.empty((len(y), parts_X[0].shape[1]), dtype=parts_X[0].dtype)
+    at = 0
+    for part in parts_X:
+        X[at:at + len(part)] = part
+        at += len(part)
+    parts_X.clear()
     print()
     print(f"{total_spans} ad span(s) across {len(recs)} recording(s)")
     print(summarise(y))
@@ -488,15 +505,18 @@ def main() -> int:
             print(f"  {held}: one class missing in training - skipped")
             oof[fold == f] = 0.0
             continue
-        proj = Projection(X[tr], args.pca)
-        w = fit(proj.apply(X[tr]), y[tr].astype(np.float32), args.l2, args.iters)
-        oof[fold == f] = predict(proj.apply(X[fold == f]), w)
+        tr_idx = np.flatnonzero(tr)
+        te_idx = np.flatnonzero(fold == f)
+        mu, sd = mean_std(X, tr_idx)
+        w = fit(X, tr_idx, y[tr].astype(np.float64), mu, sd, args.l2, args.iters)
+        oof[te_idx] = predict(X, te_idx, w, mu, sd)
         if (keep & (fold == f)).sum():
             report(y[fold == f], oof[fold == f], args.on, args.off, f"  held out: {held}")
 
-    proj_full = Projection(X[keep], args.pca)
-    w_full = fit(proj_full.apply(X[keep]), y[keep].astype(np.float32), args.l2, args.iters)
-    report(y, predict(proj_full.apply(X), w_full), args.on, args.off,
+    keep_idx = np.flatnonzero(keep)
+    mu_full, sd_full = mean_std(X, keep_idx)
+    w_full = fit(X, keep_idx, y[keep].astype(np.float64), mu_full, sd_full, args.l2, args.iters)
+    report(y, predict(X, np.arange(len(y)), w_full, mu_full, sd_full), args.on, args.off,
            "FIT (trained on everything - memorisation)")
     split_name = ("leave-one-recording-out" if len(recs) > 1
                   else f"{args.folds}-fold by {args.block_seconds:.0f}s block")
@@ -540,8 +560,7 @@ def main() -> int:
             "context_frames": args.context,
             "uses_rms": bool(rms is not None and len(rms) == len(emb)),
             "input_dim": int(X.shape[1]),
-            "mean": proj_full.mu.tolist(), "scale": proj_full.sd.tolist(),
-            "pca": None if proj_full.basis is None else proj_full.basis.tolist(),
+            "mean": mu_full.tolist(), "scale": sd_full.tolist(),
             "weights": w_full[:-1].tolist(), "bias": float(w_full[-1]),
             "on": args.on, "off": args.off,
             "trained_on": {"recordings": names, "ad_breaks": n_breaks},
