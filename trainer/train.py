@@ -395,8 +395,13 @@ def main() -> int:
         if not recs:
             return 1
 
-    parts_X, parts_y, parts_g, names = [], [], [], []
+    parts_y, parts_g, names = [], [], []
     total_spans = 0
+    # Total row count is known before anything is read: the embedding files are a fixed number of
+    # bytes per frame. That lets the design matrix be allocated once and filled in place.
+    n_total = sum(e.stat().st_size // (EMBEDDING_DIM * 2) for _, e, _, _ in recs)
+    X_all = None
+    at_row = 0
     print(f"{'recording':28s} {'when':>17s} {'min':>6s} {'breaks':>7s} {'ad frames':>10s}")
     for i, (stem, embp, labp, joinp) in enumerate(recs):
         n_frames = embp.stat().st_size // (EMBEDDING_DIM * 2)
@@ -420,9 +425,18 @@ def main() -> int:
 
         Xi = emb
         if rms is not None and len(rms) == len(emb):
-            Xi = np.hstack([Xi, (rms[:, None] + 60.0) / 60.0])
+            # .astype(float16) matters: hstack promotes to the wider dtype, so a float32 loudness
+            # column silently doubles the whole design matrix. That promotion is what made the
+            # build hold 10.7 GB and got the process killed.
+            Xi = np.hstack([Xi, ((rms[:, None] + 60.0) / 60.0).astype(np.float16)])
         Xi = stack_context(Xi, args.context)
-        parts_X.append(Xi)
+        # Written straight into the final matrix. Accumulating the parts first and copying them
+        # afterwards means both exist at once, which is the same doubling by another route.
+        if X_all is None:
+            X_all = np.empty((n_total, Xi.shape[1]), dtype=Xi.dtype)
+        X_all[at_row:at_row + len(Xi)] = Xi
+        at_row += len(Xi)
+        del Xi
         parts_y.append(yi)
         parts_g.append(np.full(len(yi), i, dtype=np.int32))
         names.append(stem.name)
@@ -436,16 +450,12 @@ def main() -> int:
               f"{sum(len(v) for v in parts_y) * HOP_S / 3600:.2f} h")
         return 0
 
-    # Filled in place rather than np.vstack'd. vstack allocates the whole result while every part
-    # is still alive, which doubles the peak for a matrix that is already the largest object here.
     y = np.concatenate(parts_y)
     groups = np.concatenate(parts_g)
-    X = np.empty((len(y), parts_X[0].shape[1]), dtype=parts_X[0].dtype)
-    at = 0
-    for part in parts_X:
-        X[at:at + len(part)] = part
-        at += len(part)
-    parts_X.clear()
+    X = X_all
+    if at_row != len(y):
+        print(f"row count mismatch: filled {at_row}, labels {len(y)}")
+        return 1
     print()
     print(f"{total_spans} ad span(s) across {len(recs)} recording(s)")
     print(summarise(y))
