@@ -1,0 +1,5 @@
+0.280	121.230	ad (high) Election Committee, Orna Porat, Igul LeTova, Cellcom, Mahsanei HaShuk, Midea, Alperin, Kan 11 Tabu promo (in progress at file start)
+635.880	800.760	ad (high) Tax Authority, Winner, Levinsky-Wingate, Park Design, Orna Porat, Midea, Ose Shalom book, C1 Resort
+1191.920	1396.850	ad (high) hour sponsored by Meatman, Kfar Saba 120, duty-free, James Richardson, Winner, Hazit HaBayit, KKL, Meitarim, Kan greeting
+1710.640	1738.200	ad (high) Kan 11 Tabu promo, forecast sponsored by Bit
+1756.310	1773.270	ad (high) Kan greeting, hour sponsor (runs to file end)

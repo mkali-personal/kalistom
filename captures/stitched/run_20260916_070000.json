@@ -1,0 +1,100 @@
+{
+  "source": "desktop stream, stitched",
+  "started_local": "2026-09-16T07:00:00+03:00",
+  "sample_rate": 16000,
+  "seconds": 2144.0,
+  "continues_previous": false,
+  "parts": [
+    {
+      "file": "desk_20260916_070000.wav",
+      "out_offset_s": 0.0,
+      "seconds": 24.0,
+      "trimmed_s": 0.0,
+      "gap_before_s": null
+    },
+    {
+      "file": "desk_20260916_070027.wav",
+      "out_offset_s": 24.0,
+      "seconds": 59.989,
+      "trimmed_s": 0.0,
+      "gap_before_s": -1.33
+    },
+    {
+      "file": "desk_20260916_070126.wav",
+      "out_offset_s": 83.989,
+      "seconds": 304.0,
+      "trimmed_s": 0.0,
+      "gap_before_s": -0.34
+    },
+    {
+      "file": "desk_20260916_070629.wav",
+      "out_offset_s": 387.989,
+      "seconds": 60.011,
+      "trimmed_s": 0.0,
+      "gap_before_s": 0.9
+    },
+    {
+      "file": "desk_20260916_070730.wav",
+      "out_offset_s": 448.0,
+      "seconds": 59.989,
+      "trimmed_s": 0.0,
+      "gap_before_s": -0.92
+    },
+    {
+      "file": "desk_20260916_070829.wav",
+      "out_offset_s": 507.989,
+      "seconds": 364.011,
+      "trimmed_s": 0.0,
+      "gap_before_s": 1.12
+    },
+    {
+      "file": "desk_20260916_071435.wav",
+      "out_offset_s": 872.0,
+      "seconds": 59.989,
+      "trimmed_s": 0.0,
+      "gap_before_s": -1.25
+    },
+    {
+      "file": "desk_20260916_071533.wav",
+      "out_offset_s": 931.989,
+      "seconds": 60.011,
+      "trimmed_s": 0.0,
+      "gap_before_s": 0.62
+    },
+    {
+      "file": "desk_20260916_071634.wav",
+      "out_offset_s": 992.0,
+      "seconds": 304.0,
+      "trimmed_s": 0.0,
+      "gap_before_s": 0.93
+    },
+    {
+      "file": "desk_20260916_072139.wav",
+      "out_offset_s": 1296.0,
+      "seconds": 59.989,
+      "trimmed_s": 0.0,
+      "gap_before_s": -0.97
+    },
+    {
+      "file": "desk_20260916_072238.wav",
+      "out_offset_s": 1355.989,
+      "seconds": 236.011,
+      "trimmed_s": 0.0,
+      "gap_before_s": -0.15
+    },
+    {
+      "file": "desk_20260916_072634.wav",
+      "out_offset_s": 1592.0,
+      "seconds": 187.989,
+      "trimmed_s": 0.0,
+      "gap_before_s": -0.72
+    },
+    {
+      "file": "desk_20260916_072941.wav",
+      "out_offset_s": 1779.989,
+      "seconds": 364.011,
+      "trimmed_s": 0.0,
+      "gap_before_s": 1.27
+    }
+  ]
+}
