@@ -95,6 +95,27 @@ def rolling(p: np.ndarray, n: int, on: float, off: float) -> np.ndarray:
     yes/no and counts the yeses, so a frame the model is agonising over at 0.51 carries exactly the
     weight of one it is certain about at 0.999. Averaging keeps that difference, which is the whole
     reason the model bothers to emit a number instead of a verdict.
+
+    DOES AVERAGING BLUR THE EXTREMES? Barely, and what blurring there is helps. The head's scores
+    are strongly bimodal - it saturates - so inside a real break most frames sit at ~1.0 and their
+    mean is still ~1.0: the median inside advertising falls only from 0.995 to 0.985. The mean
+    lands in the middle only where consecutive frames *disagree*, which is at break boundaries and
+    on isolated spikes, and being hesitant in exactly those places is the point.
+
+    Measured over the morning pool, the mean is MORE selective than a single frame at every
+    threshold - share of ad frames above it, divided by share of content frames above it:
+
+        threshold      single frame      mean of 11
+             0.50            32 : 1          38 : 1
+             0.70            45 : 1          70 : 1
+             0.90            76 : 1         160 : 1
+             0.99           152 : 1         371 : 1
+
+    So thresholds do not need lowering to compensate for averaging; that intuition is wrong here.
+    What does change is `off`. The mute is released when the *average* drops below it, and the
+    average decays slowly after a break ends, so an `off` tuned for single frames holds the mute
+    far too long into the programme. The first sweep of this rule searched only off <= 0.50 and
+    every combination therefore lost 35-44 content-seconds an hour; the useful value is 0.70.
     """
     c = np.cumsum(np.concatenate(([0.0], p.astype(np.float64))))
     lo = np.maximum(np.arange(len(p)) - n + 1, 0)
