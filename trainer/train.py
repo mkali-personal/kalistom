@@ -31,14 +31,17 @@ from __future__ import annotations
 
 import argparse
 import json
+import time
 from pathlib import Path
 
 import numpy as np
 
+from context_lr import ContextDesign, fit, predict
 from labels import DROP, HOP_S, POSITIVE, frame_labels, read_points, read_spans, summarise
 from rectime import describe, in_hours, parse_window, started_at
 
 EMBEDDING_DIM = 1024
+BASE_DIM = EMBEDDING_DIM + 1        # the embedding plus the per-frame loudness column
 MIN_SAME_BROADCAST_S = 30.0   # shorter than this is two recordings abutting, not one broadcast
 
 
@@ -71,7 +74,12 @@ def load_rms(path: Path) -> np.ndarray | None:
 def stack_context(X: np.ndarray, n: int) -> np.ndarray:
     """Concatenates each frame with the n-1 before it, so the head sees a few seconds rather than
     one. Edges repeat the first frame instead of being dropped, which costs nothing and keeps the
-    row count equal to the frame count."""
+    row count equal to the frame count.
+
+    Training no longer calls this - ContextDesign computes the same thing without materialising it.
+    It stays as the readable definition of what the context stack *is*, and as the reference the
+    fast path is checked against in test_context_lr.py.
+    """
     if n <= 1:
         return X
     idx = np.arange(len(X))[:, None] - np.arange(n)[None, ::-1]
@@ -139,89 +147,9 @@ def frame_mid(start, emb_path: Path):
     return start + timedelta(seconds=frames * HOP_S / 2)
 
 
-CHUNK = 4000          # rows per pass; 4000 x 10250 float32 is about 160 MB
-
-
-def chunk_ranges(n: int):
-    for a in range(0, n, CHUNK):
-        yield a, min(a + CHUNK, n)
-
-
-def mean_std(X: np.ndarray, idx: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """Column means and standard deviations over `idx`, in chunks.
-
-    X.mean(0) on a boolean-indexed slice would first materialise that slice - several gigabytes
-    for a copy that is read once and thrown away. This walks it instead.
-    """
-    d = X.shape[1]
-    s = np.zeros(d, np.float64)
-    ss = np.zeros(d, np.float64)
-    for a, b in chunk_ranges(len(idx)):
-        z = X[idx[a:b]].astype(np.float32)
-        s += z.sum(0, dtype=np.float64)
-        ss += np.einsum("ij,ij->j", z, z, dtype=np.float64)
-    n = max(len(idx), 1)
-    mu = s / n
-    sd = np.sqrt(np.maximum(ss / n - mu ** 2, 0.0)) + 1e-6
-    return mu.astype(np.float32), sd.astype(np.float32)
-
-
 def blocks(n: int, block_frames: int, folds: int) -> np.ndarray:
     """Fold assignment by contiguous block, so overlapping neighbours stay on the same side."""
     return (np.arange(n) // block_frames) % folds
-
-
-def fit(X, idx, y, mu, sd, l2: float, iters: int) -> np.ndarray:
-    """Class-balanced logistic regression over the rows `idx`, solved with L-BFGS.
-
-    Never materialises the training rows. The loss, the probabilities and the gradient are all
-    accumulated in one chunked pass, which is possible because the residual is elementwise in the
-    scores: a chunk's contribution to X.T @ r needs only that chunk's own rows. Standardisation
-    happens per chunk from `mu`/`sd` fitted on the training rows alone.
-
-    The design matrix is 131,000 x 10,250 here. Copying it per fold, as an earlier version did in
-    X[tr] and again in the projection, needed 21 GB and the operating system killed the process.
-    """
-    from scipy.optimize import minimize                    # imported late; only this needs it
-
-    n, d = len(idx), X.shape[1]
-    inv_sd = (1.0 / sd).astype(np.float32)
-    pos, neg = max((y == 1).sum(), 1), max((y == 0).sum(), 1)
-    sw = np.where(y == 1, 0.5 / pos, 0.5 / neg).astype(np.float64) * n
-
-    def loss_grad(w):
-        w32 = w.astype(np.float32)
-        ww, bias = w32[:d], float(w32[d])
-        ll = 0.0
-        g = np.zeros(d + 1, np.float64)
-        for a, b in chunk_ranges(n):
-            z = (X[idx[a:b]].astype(np.float32) - mu) * inv_sd
-            sc = np.clip(z @ ww + bias, -30, 30).astype(np.float64)
-            yc, swc = y[a:b], sw[a:b]
-            ll += float(np.sum(swc * (np.logaddexp(0, sc) - yc * sc)))
-            r = (swc * (1.0 / (1.0 + np.exp(-sc)) - yc)).astype(np.float32)
-            g[:d] += z.T @ r
-            g[d] += float(r.sum())
-        ll /= n
-        g /= n
-        g[:d] += l2 * w[:d]
-        return ll + 0.5 * l2 * float(w[:d] @ w[:d]), g
-
-    res = minimize(loss_grad, np.zeros(d + 1), jac=True, method="L-BFGS-B",
-                   options={"maxiter": iters, "maxcor": 20})
-    return res.x.astype(np.float32)
-
-
-def predict(X, idx, w, mu, sd) -> np.ndarray:
-    """Probabilities for rows `idx`, chunked for the same reason."""
-    d = X.shape[1]
-    inv_sd = (1.0 / sd).astype(np.float32)
-    ww, bias = w[:d].astype(np.float32), float(w[d])
-    out = np.empty(len(idx), np.float32)
-    for a, b in chunk_ranges(len(idx)):
-        z = (X[idx[a:b]].astype(np.float32) - mu) * inv_sd
-        out[a:b] = 1.0 / (1.0 + np.exp(-np.clip(z @ ww + bias, -30, 30)))
-    return out
 
 
 def policy(p: np.ndarray, on: float, off: float) -> np.ndarray:
@@ -346,8 +274,6 @@ def main() -> int:
     ap.add_argument("--exclude-hours", default="", metavar="HH-HH",
                     help="the opposite: drop recordings whose midpoint falls in the window, "
                          "e.g. --exclude-hours 00:30-05:30 to leave out the dead of night")
-    ap.add_argument("--pca", type=int, default=0,
-                    help="project onto this many principal components first (0 = no projection)")
     ap.add_argument("--l2", type=float, default=1e-3)
     ap.add_argument("--iters", type=int, default=3000)
     ap.add_argument("--folds", type=int, default=5)
@@ -400,7 +326,8 @@ def main() -> int:
     # Total row count is known before anything is read: the embedding files are a fixed number of
     # bytes per frame. That lets the design matrix be allocated once and filled in place.
     n_total = sum(e.stat().st_size // (EMBEDDING_DIM * 2) for _, e, _, _ in recs)
-    X_all = None
+    E_all = None
+    bounds: list[tuple[int, int]] = []
     at_row = 0
     print(f"{'recording':28s} {'when':>17s} {'min':>6s} {'breaks':>7s} {'ad frames':>10s}")
     for i, (stem, embp, labp, joinp) in enumerate(recs):
@@ -423,20 +350,22 @@ def main() -> int:
         rms = load_rms(embp.with_suffix(".jsonl"))
         yi = frame_labels(len(emb), spans, joins)
 
-        Xi = emb
+        # Only the *base* frames are stored. The context stack is applied at score time by
+        # ContextDesign, which shifts scalars instead of copying features - see context_lr.py.
+        # Written straight into the final matrix: accumulating parts first and copying them
+        # afterwards means both exist at once.
+        if E_all is None:
+            E_all = np.empty((n_total, BASE_DIM), dtype=np.float32)
+        rows = slice(at_row, at_row + len(emb))
+        E_all[rows, :EMBEDDING_DIM] = emb
         if rms is not None and len(rms) == len(emb):
-            # .astype(float16) matters: hstack promotes to the wider dtype, so a float32 loudness
-            # column silently doubles the whole design matrix. That promotion is what made the
-            # build hold 10.7 GB and got the process killed.
-            Xi = np.hstack([Xi, ((rms[:, None] + 60.0) / 60.0).astype(np.float16)])
-        Xi = stack_context(Xi, args.context)
-        # Written straight into the final matrix. Accumulating the parts first and copying them
-        # afterwards means both exist at once, which is the same doubling by another route.
-        if X_all is None:
-            X_all = np.empty((n_total, Xi.shape[1]), dtype=Xi.dtype)
-        X_all[at_row:at_row + len(Xi)] = Xi
-        at_row += len(Xi)
-        del Xi
+            E_all[rows, EMBEDDING_DIM] = (rms + 60.0) / 60.0
+        else:
+            E_all[rows, EMBEDDING_DIM] = 0.0
+            print(f"  (no usable per-frame loudness for {stem.name}; column left flat)")
+        # Context must not reach across this boundary into unrelated audio.
+        bounds.append((at_row, at_row + len(emb)))
+        at_row += len(emb)
         parts_y.append(yi)
         parts_g.append(np.full(len(yi), i, dtype=np.int32))
         names.append(stem.name)
@@ -452,15 +381,17 @@ def main() -> int:
 
     y = np.concatenate(parts_y)
     groups = np.concatenate(parts_g)
-    X = X_all
     if at_row != len(y):
         print(f"row count mismatch: filled {at_row}, labels {len(y)}")
         return 1
+    design = ContextDesign(E_all, bounds, args.context)
     print()
     print(f"{total_spans} ad span(s) across {len(recs)} recording(s)")
     print(summarise(y))
-    print(f"features: {X.shape[1]} per frame ({args.context} frames of context = "
-          f"{(args.context - 1) * HOP_S + 0.975:.1f}s)")
+    print(f"features: {design.taps * design.d0} per frame ({args.context} frames of context = "
+          f"{(args.context - 1) * HOP_S + 0.975:.1f}s), held as {design.d0} base columns "
+          f"({E_all.nbytes / 1e9:.2f} GB) rather than {design.taps * design.d0} stacked "
+          f"({design.taps * E_all.nbytes / 1e9:.2f} GB)")
 
     if (y == POSITIVE).sum() == 0:
         print("\nNo positive frames - nothing to learn. Check the label track's time range.")
@@ -507,26 +438,30 @@ def main() -> int:
     # weights - is fitted inside the fold, on training rows only. Standardising the whole matrix
     # first is a small leak but a real one, and it is exactly the sort that makes a held-out
     # number quietly optimistic.
+    # Rows are never removed, only masked. The context stack is defined by a row's position among
+    # its neighbours, so dropping a boundary-straddling row from the matrix would silently shift
+    # everything after it into the wrong context. Dropped rows carry zero weight instead.
+    yf = (y == POSITIVE).astype(np.float64)
     oof = np.zeros(len(y), dtype=np.float32)
     for f in range(args.folds):
         tr = keep & (fold != f)
+        te = fold == f
         held = names[f] if len(recs) > 1 else f"block fold {f}"
         if (y[tr] == POSITIVE).sum() == 0 or (y[tr] == 0).sum() == 0:
             print(f"  {held}: one class missing in training - skipped")
-            oof[fold == f] = 0.0
+            oof[te] = 0.0
             continue
-        tr_idx = np.flatnonzero(tr)
-        te_idx = np.flatnonzero(fold == f)
-        mu, sd = mean_std(X, tr_idx)
-        w = fit(X, tr_idx, y[tr].astype(np.float64), mu, sd, args.l2, args.iters)
-        oof[te_idx] = predict(X, te_idx, w, mu, sd)
-        if (keep & (fold == f)).sum():
-            report(y[fold == f], oof[fold == f], args.on, args.off, f"  held out: {held}")
+        t0 = time.time()
+        mu, sd = design.mean_std(tr)
+        w = fit(design, tr, yf, mu, sd, args.l2, args.iters)
+        oof[te] = predict(design, w, mu, sd)[te]
+        if (keep & te).sum():
+            report(y[te], oof[te], args.on, args.off,
+                   f"  held out: {held} [{time.time() - t0:.0f}s, {fit.last}]")
 
-    keep_idx = np.flatnonzero(keep)
-    mu_full, sd_full = mean_std(X, keep_idx)
-    w_full = fit(X, keep_idx, y[keep].astype(np.float64), mu_full, sd_full, args.l2, args.iters)
-    report(y, predict(X, np.arange(len(y)), w_full, mu_full, sd_full), args.on, args.off,
+    mu_full, sd_full = design.mean_std(keep)
+    w_full = fit(design, keep, yf, mu_full, sd_full, args.l2, args.iters)
+    report(y, predict(design, w_full, mu_full, sd_full), args.on, args.off,
            "FIT (trained on everything - memorisation)")
     split_name = ("leave-one-recording-out" if len(recs) > 1
                   else f"{args.folds}-fold by {args.block_seconds:.0f}s block")
@@ -569,8 +504,13 @@ def main() -> int:
             "type": "logistic_regression",
             "context_frames": args.context,
             "uses_rms": bool(rms is not None and len(rms) == len(emb)),
-            "input_dim": int(X.shape[1]),
-            "mean": mu_full.tolist(), "scale": sd_full.tolist(),
+            # Written in the stacked convention the phone will apply - one entry per input column,
+            # oldest frame first - even though training holds one set of statistics per base
+            # column and shares it across taps. Tiling here keeps the file a complete description
+            # of the model, so the device never has to know how it was fitted.
+            "input_dim": int(design.taps * design.d0),
+            "mean": np.tile(mu_full, design.taps).tolist(),
+            "scale": np.tile(sd_full, design.taps).tolist(),
             "weights": w_full[:-1].tolist(), "bias": float(w_full[-1]),
             "on": args.on, "off": args.off,
             "trained_on": {"recordings": names, "ad_breaks": n_breaks},
