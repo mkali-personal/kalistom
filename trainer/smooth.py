@@ -19,22 +19,30 @@ causal, using only frames already seen, and each keeps O(1) or O(n) state so it 
 as a few lines in the audio callback. The cost of causality is entry latency, which is a few
 seconds of ad at the start of each break.
 
-Four rules, cheapest state first:
+Six rules, cheapest state first:
 
-    hysteresis  one boolean.  What ships today: mute above `on`, release below `off`.
+    hysteresis  one boolean.  Mute above `on`, release below `off`. No smoothing.
+    ema         one float.    Exponentially-weighted average of the score, then hysteresis.
     forward     two floats.   A 2-state HMM filtered forward.
     dwell       one counter.  Hysteresis that cannot change its mind for N seconds.
-    majority    a ring of n.  Round the last n frames all up or all down.
+    rolling     a ring of n.  Plain average of the score over n frames, then hysteresis. BEST.
+    majority    a ring of n.  Round each frame to yes/no FIRST, then count the yeses. WORST.
 
-WHAT THE MEASUREMENT SAYS. `hysteresis` and `forward` share the Pareto front and neither dominates;
-they trade places depending on how much content you will sacrifice. `dwell` reaches the front only
-far past any sensible budget. `majority` never reaches it at all - it is both the weakest and, at
-52 toggles an hour against 21-23, by far the most flickery, because a window vote sitting near its
-threshold oscillates.
+NEVER ROUND BEFORE YOU SMOOTH. `rolling` and `majority` are the same window over the same frames;
+the only difference is that majority collapses each score to 0 or 1 before combining them. At an
+identical 11 content-seconds lost per hour that one choice costs 115 ad-seconds per hour (441
+against 326) and triples the flicker (17 toggles an hour against 52). Rounding discards exactly
+the information the averaging needs: a frame the model is agonising over at 0.51 should not carry
+the same weight as one it is certain of at 0.999, and after rounding it does. The number is the
+model's whole output; the verdict is a summary of it, and summarising before averaging is throwing
+the evidence away and keeping the conclusion.
 
-The largest single win needs none of this machinery. Lowering `off` - staying muted unless the
-model is actively confident content has resumed - takes mid-break gaps from 141 s/h at off=0.80 to
-80 at off=0.50 to 42 at off=0.20, while *reducing* flicker. That is one number in a config file.
+The rest of the ordering, all at 11 content-seconds lost: rolling 441, ema 440, hysteresis 434,
+forward 415, majority 326. `dwell` reaches the front only far past any sensible budget.
+
+The largest single win needs no window at all. Lowering `off` - staying muted unless the model is
+actively confident content has resumed - takes mid-break gaps from 141 s/h at off=0.80 to 80 at
+off=0.50 to 42 at off=0.20, while *reducing* flicker. That is one number in a config file.
 
 Usage:
     python trainer/smooth.py captures/oof_33rec.npz --dir captures/stitched --hours 07-11
@@ -78,6 +86,35 @@ def majority(p: np.ndarray, thr: float, n: int, need: int | None = None) -> np.n
     c = np.cumsum(np.concatenate(([0], b)))
     lo = np.maximum(np.arange(len(b)) - n + 1, 0)
     return (c[1:] - c[lo]) >= need
+
+
+def rolling(p: np.ndarray, n: int, on: float, off: float) -> np.ndarray:
+    """Average the *score* over the last n frames, then apply the thresholds to the average.
+
+    This is `majority` done without throwing the scores away first. Majority rounds each frame to
+    yes/no and counts the yeses, so a frame the model is agonising over at 0.51 carries exactly the
+    weight of one it is certain about at 0.999. Averaging keeps that difference, which is the whole
+    reason the model bothers to emit a number instead of a verdict.
+    """
+    c = np.cumsum(np.concatenate(([0.0], p.astype(np.float64))))
+    lo = np.maximum(np.arange(len(p)) - n + 1, 0)
+    avg = (c[1:] - c[lo]) / (np.arange(len(p)) - lo + 1)
+    return hysteresis(avg, on, off)
+
+
+def ema(p: np.ndarray, half_life_s: float, on: float, off: float) -> np.ndarray:
+    """The same idea with one float of state: an exponentially-weighted average of the score.
+
+    Cheaper than `rolling` - no ring buffer - and it fades old evidence smoothly instead of having
+    it drop off a cliff n frames later.
+    """
+    a = 0.5 ** (HOP_S / max(half_life_s, 1e-6))
+    out = np.empty(len(p), np.float64)
+    s = 0.0
+    for i, v in enumerate(p):
+        s = a * s + (1 - a) * float(v)
+        out[i] = s
+    return hysteresis(out, on, off)
 
 
 def dwell(p: np.ndarray, on: float, off: float,
@@ -210,6 +247,18 @@ def main() -> int:
             for hold in (10.0, 20.0, 30.0, 45.0):
                 cands.append((f"dwell on={on} off={off} hold={hold:.0f}s",
                               dwell(p, on, off, hold)))
+    for n in (3, 5, 11, 21, 41):
+        for on in (0.999, 0.99, 0.97, 0.95, 0.9, 0.8):
+            for off in (0.7, 0.5, 0.3, 0.15, 0.05):
+                if off <= on:
+                    cands.append((f"rolling n={n}({n * HOP_S:.0f}s) on={on} off={off}",
+                                  rolling(p, n, on, off)))
+    for hl in (0.5, 1.0, 2.0, 4.0, 8.0):
+        for on in (0.999, 0.99, 0.97, 0.95, 0.9, 0.8):
+            for off in (0.7, 0.5, 0.3, 0.15, 0.05):
+                if off <= on:
+                    cands.append((f"ema half-life={hl}s on={on} off={off}",
+                                  ema(p, hl, on, off)))
     for mad in (45.0, 60.0, 90.0):
         for temp in (0.1, 0.03, 0.01):
             for cut in (0.5, 0.9, 0.99):
