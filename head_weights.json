@@ -30760,8 +30760,8 @@
   -0.041126150637865067
  ],
  "bias": -6.123291015625,
- "on": 0.6,
- "off": 0.2,
+ "on": 0.999,
+ "off": 0.8,
  "trained_on": {
   "recordings": [
    "run_20260909_235255",
@@ -30807,5 +30807,14 @@
   "trade_ratio": 3.277030760729416,
   "ad_seconds_heard_per_hour": 26.3621208108066,
   "content_seconds_muted_per_hour": 152.25527008709471
+ },
+ "operating_point": {
+  "chosen_on": "07-11, the hours the app will actually run",
+  "basis_hours": 9.76,
+  "recordings": 18,
+  "ad_seconds_saved_per_hour": 372,
+  "content_seconds_lost_per_hour": 9,
+  "do_nothing_ad_seconds_per_hour": 555,
+  "note": "Pooled over all 24 h the same weights give 414 saved for 30 lost. The morning figure is the one that matters; evenings are in the training pool to teach the model that music is not advertising, not because the app will run then."
  }
 }

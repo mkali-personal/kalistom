@@ -216,7 +216,12 @@ def sweep(y: np.ndarray, p: np.ndarray, gap: float = 0.0) -> None:
     """
     hours = len(y) * HOP_S / 3600
     base = int((y == POSITIVE).sum()) * HOP_S / max(hours, 1e-9)
-    grid = (0.5, 0.6, 0.7, 0.8, 0.9, 0.95, 0.98, 0.99)
+    # The top of the grid has to reach further than feels reasonable. An ad break lasts
+    # 15-120 s, so the evidence needed to *stay* inside one is much weaker than the
+    # evidence needed to enter, and the best points sit at a very high `on` with a low
+    # `off`. A grid stopping at 0.99 cannot express that and quietly reports a worse
+    # operating point as the best available.
+    grid = (0.2, 0.5, 0.6, 0.7, 0.8, 0.9, 0.95, 0.98, 0.99, 0.995, 0.999)
     rows = []
     for on in grid:
         for off in grid:
@@ -232,7 +237,7 @@ def sweep(y: np.ndarray, p: np.ndarray, gap: float = 0.0) -> None:
     print(f"{'on':>5s} {'off':>5s} {'ad-sec heard/h':>15s} {'content-sec lost/h':>19s} "
           f"{'saved per lost':>15s}")
     for saved, lost, on, off, heard in sorted(rows, key=lambda r: -r[0] / max(r[1], 1e-9))[:6]:
-        print(f"{on:5.2f} {off:5.2f} {heard:15.0f} {lost:19.0f} "
+        print(f"{on:5.3f} {off:5.3f} {heard:15.0f} {lost:19.0f} "
               f"{saved / max(lost, 1e-9):15.1f}")
     print(f"  (doing nothing: {base:.0f} ad-seconds heard per hour, 0 content lost)")
 
@@ -240,13 +245,13 @@ def sweep(y: np.ndarray, p: np.ndarray, gap: float = 0.0) -> None:
         ok = [r for r in rows if r[1] <= budget]
         if ok:
             best = max(ok, key=lambda r: r[0])
-            print(f"  within {budget:.0f} content-seconds/hour: on={best[2]:.2f} off={best[3]:.2f} "
+            print(f"  within {budget:.0f} content-seconds/hour: on={best[2]:.3f} off={best[3]:.3f} "
                   f"saves {best[0]:.0f} ad-seconds/hour")
             return {"budget": budget, "saved": best[0], "lost": best[1],
                     "on": best[2], "off": best[3]}
     worst_case = min(rows, key=lambda r: r[1])
-    print(f"  No operating point keeps content loss under 60 s/h - the most conservative setting")
-    print(f"  tried (on={worst_case[2]:.2f} off={worst_case[3]:.2f}) still wrongly mutes "
+    print("  No operating point keeps content loss under 60 s/h - the most conservative setting")
+    print(f"  tried (on={worst_case[2]:.3f} off={worst_case[3]:.3f}) still wrongly mutes "
           f"{worst_case[1]:.0f} s/h.")
     print("  This is not a tuning problem. The model is not separating advertising from content")
     print("  well enough for any threshold to help, and more labelled breaks are what it needs.")
@@ -512,7 +517,12 @@ def main() -> int:
             "mean": np.tile(mu_full, design.taps).tolist(),
             "scale": np.tile(sd_full, design.taps).tolist(),
             "weights": w_full[:-1].tolist(), "bias": float(w_full[-1]),
-            "on": args.on, "off": args.off,
+            # The swept point, not the argparse defaults. --on/--off only ever set what the
+            # per-fold reports were printed at; shipping them here would put thresholds in the
+            # file that nothing recommended and that no number above was measured with.
+            "on": float(best_point["on"]) if best_point else args.on,
+            "off": float(best_point["off"]) if best_point else args.off,
+            "operating_point": best_point,
             "trained_on": {"recordings": names, "ad_breaks": n_breaks},
             "held_out": m,
         }, indent=1), encoding="utf-8")
