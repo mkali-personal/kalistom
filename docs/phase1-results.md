@@ -367,3 +367,95 @@ includes programming that will never be playing at 08:00.
 
 **Train on everything; evaluate on the hours that matter.** Breadth belongs in the data, narrowness
 in the judgement.
+
+## 33 recordings, and the two things that were hiding the model's quality (2026-09-17)
+
+The pool reached 33 recordings, 85 breaks, 17.12 h. Two problems had to be fixed before it could
+be trained at all, and a third turned out to have been understating every number reported above.
+
+### The design matrix never needed to exist
+
+The head sees ten consecutive frames, so the obvious design matrix is 128,366 x 10,250 - and every
+embedding sits in ten of its rows. Streaming it in chunks had solved the memory kills, but not the
+volume: each L-BFGS iteration still converted and read 2.6 GB twice, and the run measured 2.4 hours
+per fold, which is 75 hours for 31 folds.
+
+The head is linear, so a row's score is the sum over taps of one base frame against that tap's
+weights. The forward pass is therefore a single product against the *base* matrix, yielding one
+scalar per row and tap, after which the context is applied by shifting those scalars rather than by
+copying features; the gradient scatters the residual back along the same shifts. Identical
+arithmetic, a tenth of the memory traffic, and the shifts are contiguous slices because within a
+recording "the frame `lag` back" is just the matrix offset by `lag` rows.
+
+| | before | after |
+|---|---|---|
+| per L-BFGS iteration | ~17 s | **0.169 s** |
+| per fold | 2.4 h | **85 s** |
+| 33 folds | ~75 h | **47.7 min** |
+| matrix in memory | 5.26 GB stacked | **0.53 GB base** |
+
+`stack_context` remains as the readable definition of what the stack is, and
+`trainer/test_context_lr.py` checks the fast path against it - scores and gradient, including
+recordings shorter than the context window, where every tap clamps. A wrong lag would not crash;
+it would quietly train on the wrong frames.
+
+### The threshold grid stopped one decimal place too early
+
+More consequential, and it had been distorting every operating point in this document. The sweep
+tried thresholds up to 0.99. But an ad break runs 15-120 s, so the evidence needed to *stay* inside
+one is far weaker than the evidence needed to enter, and the good operating points sit at a very
+high `on` with a low `off` - which a grid ending at 0.99 cannot express.
+
+On the morning hours, with the grid extended to 0.999:
+
+| on | off | ad-sec saved/h | content-sec lost/h | ratio |
+|---|---|---|---|---|
+| 0.999 | 0.999 | 174 | **3** | 55.1 |
+| 0.999 | 0.980 | 264 | 6 | 46.2 |
+| **0.999** | **0.800** | **372** | **9** | **41.5** |
+| 0.99 | 0.98 | 348 | 12 | 28.3 |
+
+**The plan's budget of 10 content-seconds lost per hour is met.** At `on=0.999 off=0.800` the model
+removes 372 of the 555 ad-seconds per hour in the 07:00-11:00 pool - two thirds of the advertising
+- for about one wrongly-muted second every seven minutes. Under the old grid no point met that
+budget and the sweep fell through to its 30 s/h tier, reporting 335 saved for 28 lost.
+
+The exported weights file had a matching fault: it shipped `--on`/`--off`, which only ever set what
+the per-fold reports were printed at, so it carried 0.6/0.2 - thresholds nothing recommended and no
+reported number was measured with. It now carries the swept point.
+
+### What the extra eleven recordings bought
+
+| | 22 recordings | 33 recordings |
+|---|---|---|
+| pooled precision | 78.4 % | 78.2 % |
+| pooled recall | 89.8 % | **93.7 %** |
+| morning, within budget | 320 saved / 12 lost | **372 saved / 9 lost** |
+
+Recall rose four points while precision held, so the new recordings bought coverage rather than
+more of the same. Thirty-two of the thirty-three folds stopped at the 500-iteration cap rather than
+converging, so the fit is still moving; now that a fold costs 85 seconds instead of 2.4 hours, a
+longer budget is cheap to test.
+
+### The music confusion receded, but something took its place
+
+`errors.py` on the new predictions: 535 false-positive seconds against 3,552 false-negative, and
+87 % of all error-minutes touch a real break - disagreements about where a break begins or ends,
+not about whether one is happening. Eleven of the twelve longest mistakes are now false negatives.
+The Naomi Shemer failure mode - firing at p=1.00 on a song - no longer dominates.
+
+What remains is one recording, `run_20260910_205535`, where the model fires at p=1.00 on the
+opening minute and again at 0.7-1.2 min, 400 s from the nearest real advertisement. The transcript
+shows neither music nor advertising but a documentary interview: several voices, fast cuts, and
+production. **The model appears to have learnt "produced package" rather than "advertisement".**
+That is a hypothesis from a transcript and wants checking against the audio before it is believed.
+
+The older out-of-fold file was overwritten by this run, so the two error profiles cannot be put
+side by side. `--save-oof` names now carry the recording count so they accumulate.
+
+### Still outstanding
+
+Every number in this document rests on labels drafted by a model and reviewed, never on labels
+made independently. One recording hand-labelled without looking at the draft would let
+`compare_labels.py` measure how much of the residual error is the labelling rather than the model.
+That remains the largest unquantified term in all of this.
