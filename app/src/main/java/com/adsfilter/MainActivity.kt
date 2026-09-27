@@ -36,6 +36,8 @@ class MainActivity : Activity() {
     private lateinit var statusDot: View
     private lateinit var statusText: TextView
     private lateinit var statusDetail: TextView
+    private var scope: ScopeView? = null
+    private var scopeTicker: Runnable? = null
 
     private val projectionRequest = 1001
     private val permissionRequest = 1002
@@ -76,6 +78,21 @@ class MainActivity : Activity() {
             marginTop(10f)
         )
 
+        root.addView(label("DECISION", 11f, p.muted, bold = true).apply {
+            letterSpacing = 0.12f
+        }, marginTop(22f))
+        scope = ScopeView(this)
+        root.addView(scope, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT, dp(190f)
+        ).apply { topMargin = dp(6f) })
+        root.addView(label(
+            "Horizontal is the model's smoothed score, so the shaded bands are the mute rule "
+                + "itself: clear, then the hysteresis corridor, then muting. Vertical is how "
+                + "musical YAMNet thinks the audio is - the model's known weakness is mistaking "
+                + "music for advertising, so a dot moving right while high up is that mistake.",
+            11f, p.muted
+        ), marginTop(6f))
+
         root.addView(label("TOOLS", 11f, p.muted, bold = true).apply {
             letterSpacing = 0.12f
         }, marginTop(22f))
@@ -101,6 +118,16 @@ class MainActivity : Activity() {
 
         setContentView(root)
 
+        // The scope animates independently of the log: frames arrive about twice a second and
+        // the trail fades continuously, so it wants a steady repaint rather than an event.
+        scopeTicker = object : Runnable {
+            override fun run() {
+                scope?.invalidate()
+                scope?.postDelayed(this, 100)
+            }
+        }
+        scope?.post(scopeTicker!!)
+
         RecorderService.listener = { line ->
             runOnUiThread { append(line); refreshStatus() }
         }
@@ -115,6 +142,9 @@ class MainActivity : Activity() {
 
     override fun onDestroy() {
         RecorderService.listener = null
+        // Without this the repaint loop keeps a reference to the destroyed activity alive.
+        scopeTicker?.let { scope?.removeCallbacks(it) }
+        scopeTicker = null
         super.onDestroy()
     }
 

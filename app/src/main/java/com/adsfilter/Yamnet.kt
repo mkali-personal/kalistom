@@ -46,6 +46,16 @@ class Yamnet(context: Context) : AutoCloseable {
     /** Human-readable AudioSet class names, index-aligned with [scores]. */
     val classNames: List<String>
 
+    /**
+     * Index of the AudioSet "Music" class, found by name rather than hard-coded at 132 - the class
+     * map is an asset and a different YAMNet build could renumber it. -1 if the map is missing.
+     *
+     * Worth carrying separately from the top-3 because it is wanted precisely when it is NOT in
+     * the top 3: the model's known weakness is confusing music with advertising, so the useful
+     * question is how musical the audio is even while speech dominates.
+     */
+    val musicIndex: Int
+
     init {
         val model = loadModel(context)
         val opts = Interpreter.Options().apply {
@@ -60,6 +70,8 @@ class Yamnet(context: Context) : AutoCloseable {
         interpreter.allocateTensors()
 
         classNames = loadClassNames(context)
+        musicIndex = classNames.indexOfFirst { it.equals("Music", ignoreCase = true) }
+        if (musicIndex < 0) Log.w(TAG, "no \"Music\" class in the map; scope y-axis will be flat")
 
         val inShape = interpreter.getInputTensor(0).shape().joinToString("x")
         val outShapes = (0 until interpreter.outputTensorCount)

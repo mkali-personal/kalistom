@@ -20,7 +20,7 @@ import kotlin.math.sqrt
 class FrameEmitter(
     private val net: Yamnet,
     private val onFrame: (index: Long, embedding: FloatArray, rmsDbfs: Float,
-                          topIdx: IntArray, topScore: FloatArray) -> Unit
+                          topIdx: IntArray, topScore: FloatArray, musicScore: Float) -> Unit
 ) {
     private val buf = FloatArray(Yamnet.WINDOW + 2 * Yamnet.HOP)
     private val window = FloatArray(Yamnet.WINDOW)
@@ -61,7 +61,8 @@ class FrameEmitter(
             val rms = rmsDbfs(window)
             val r = net.run(window)
             val top = topK(r.scores, 3)
-            onFrame(frameIndex, r.embedding, rms, top.first, top.second)
+            val music = if (net.musicIndex >= 0) r.scores[net.musicIndex] else 0f
+            onFrame(frameIndex, r.embedding, rms, top.first, top.second, music)
             frameIndex++
             System.arraycopy(buf, Yamnet.HOP, buf, 0, fill - Yamnet.HOP)
             fill -= Yamnet.HOP

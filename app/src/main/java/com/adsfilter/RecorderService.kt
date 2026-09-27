@@ -156,6 +156,8 @@ class RecorderService : Service() {
             log("no classifier head in assets - recording only, nothing will be muted")
         } else {
             val d = detector!!
+            Scope.onThreshold = d.onThreshold
+            Scope.offThreshold = d.offThreshold
             log("classifier loaded: mutes above ${d.onThreshold}, releases below ${d.offThreshold}")
         }
 
@@ -213,7 +215,7 @@ class RecorderService : Service() {
 
         // Framing lives in FrameEmitter so live capture and offline processing of desktop files
         // cannot drift apart - see FrameEmitter's docs.
-        val emitter = FrameEmitter(net) { index, embedding, rms, topIdx, topScore ->
+        val emitter = FrameEmitter(net) { index, embedding, rms, topIdx, topScore, music ->
             val det = detector
             var muted = false
             if (det != null) {
@@ -227,10 +229,13 @@ class RecorderService : Service() {
                 }
                 session?.writeFrame(
                     index, embedding, rms, topIdx, topScore,
-                    det.rawScore, det.smoothedScore, muted
+                    det.rawScore, det.smoothedScore, muted, music
                 )
+                Scope.push(det.smoothedScore, music, muted)
             } else {
-                session?.writeFrame(index, embedding, rms, topIdx, topScore)
+                session?.writeFrame(
+                    index, embedding, rms, topIdx, topScore, musicScore = music
+                )
             }
             topLine = when {
                 det != null && muted -> "MUTED  p=${"%.2f".format(det.smoothedScore)}"
@@ -268,6 +273,7 @@ class RecorderService : Service() {
                 closeSession()
                 emitter.reset()
                 detector?.reset()
+                Scope.clear()
                 Ducker.releaseNow("session closed")
                 enforceStorageBudget(sessionsDir)
             }
@@ -308,6 +314,7 @@ class RecorderService : Service() {
         }
 
         closeSession()
+        Scope.clear()
         Ducker.releaseNow("capture loop ended")
         isRunning = false
     }

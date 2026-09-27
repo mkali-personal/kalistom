@@ -113,7 +113,8 @@ class SessionWriter(dir: File, private val embeddingDim: Int) : AutoCloseable {
         topScore: FloatArray,
         adScore: Float = Float.NaN,
         adSmoothed: Float = Float.NaN,
-        muted: Boolean = false
+        muted: Boolean = false,
+        musicScore: Float = Float.NaN
     ) {
         if (closed) return
         check(frameIndex == framesWritten) {
@@ -149,6 +150,7 @@ class SessionWriter(dir: File, private val embeddingDim: Int) : AutoCloseable {
             sb.append(""","ad":""").append(fmt(adScore))
                 .append(""","ads":""").append(fmt(adSmoothed))
                 .append(""","mute":""").append(if (muted) 1 else 0)
+            if (!musicScore.isNaN()) sb.append(""","mus":""").append(fmt(musicScore))
         }
         sb.append("}")
         meta.write(sb.toString())

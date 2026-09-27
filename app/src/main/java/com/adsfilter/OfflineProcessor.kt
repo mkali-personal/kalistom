@@ -106,7 +106,7 @@ object OfflineProcessor {
             meta.newLine()
 
             val row = ByteArray(Yamnet.EMBEDDING_DIM * 2)
-            val emitter = FrameEmitter(net) { index, embedding, rms, topIdx, topScore ->
+            val emitter = FrameEmitter(net) { index, embedding, rms, topIdx, topScore, _ ->
                 for (i in 0 until Yamnet.EMBEDDING_DIM) {
                     val h = Half.toHalf(embedding[i]).toInt()
                     row[i * 2] = (h and 0xFF).toByte()
