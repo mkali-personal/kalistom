@@ -81,6 +81,14 @@ class RecorderService : Service() {
     private var worker: Thread? = null
     private var yamnet: Yamnet? = null
     private var session: SessionWriter? = null
+    private var detector: Detector? = null
+
+    /**
+     * The kill switch. When false the head still scores every frame and the scores are still
+     * written to the session, but nothing is ever attenuated - so a suspect model can be measured
+     * on real listening without being allowed to touch the volume.
+     */
+    @Volatile var duckingEnabled = true
 
     @Volatile private var stopping = false
     private val markQueue = ConcurrentLinkedQueue<String>()
@@ -143,6 +151,13 @@ class RecorderService : Service() {
         }, mainHandler)
 
         yamnet = Yamnet(this)
+        detector = Detector.load(this)
+        if (detector == null) {
+            log("no classifier head in assets - recording only, nothing will be muted")
+        } else {
+            val d = detector!!
+            log("classifier loaded: mutes above ${d.onThreshold}, releases below ${d.offThreshold}")
+        }
 
         val config = AudioPlaybackCaptureConfiguration.Builder(proj)
             .addMatchingUsage(AudioAttributes.USAGE_MEDIA)
@@ -199,9 +214,29 @@ class RecorderService : Service() {
         // Framing lives in FrameEmitter so live capture and offline processing of desktop files
         // cannot drift apart - see FrameEmitter's docs.
         val emitter = FrameEmitter(net) { index, embedding, rms, topIdx, topScore ->
-            session?.writeFrame(index, embedding, rms, topIdx, topScore)
-            if (net.classNames.isNotEmpty()) {
-                topLine = net.classNames.getOrElse(topIdx[0]) { "?" }
+            val det = detector
+            var muted = false
+            if (det != null) {
+                muted = det.push(embedding, rms)
+                // The A/B test drives the attenuator on a fixed schedule to measure the capture
+                // path; letting the detector fight it would corrupt the measurement.
+                if (duckingEnabled && !attenTestRunning) {
+                    // Called every frame whether ducking or not: renewing the request is what
+                    // keeps Ducker's watchdog from releasing, so silence here means release.
+                    Ducker.request(muted)
+                }
+                session?.writeFrame(
+                    index, embedding, rms, topIdx, topScore,
+                    det.rawScore, det.smoothedScore, muted
+                )
+            } else {
+                session?.writeFrame(index, embedding, rms, topIdx, topScore)
+            }
+            topLine = when {
+                det != null && muted -> "MUTED  p=${"%.2f".format(det.smoothedScore)}"
+                det != null -> "p=${"%.2f".format(det.smoothedScore)}"
+                net.classNames.isNotEmpty() -> net.classNames.getOrElse(topIdx[0]) { "?" }
+                else -> ""
             }
         }
 
@@ -227,10 +262,13 @@ class RecorderService : Service() {
             if (session == null && playing) {
                 session = SessionWriter(sessionsDir, Yamnet.EMBEDDING_DIM)
                 emitter.reset()
+                detector?.reset()
                 log("session start: ${session!!.name}")
             } else if (session != null && !playing && now - lastActiveMs > IDLE_CLOSE_MS) {
                 closeSession()
                 emitter.reset()
+                detector?.reset()
+                Ducker.releaseNow("session closed")
                 enforceStorageBudget(sessionsDir)
             }
 
@@ -270,6 +308,7 @@ class RecorderService : Service() {
         }
 
         closeSession()
+        Ducker.releaseNow("capture loop ended")
         isRunning = false
     }
 
@@ -421,6 +460,7 @@ class RecorderService : Service() {
 
     private fun stopAll() {
         stopping = true
+        Ducker.releaseNow("service stopping")
         Attenuator.releaseQuietly()   // never leave the device attenuated
         try { worker?.join(3000) } catch (_: InterruptedException) {}
         worker = null

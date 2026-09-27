@@ -99,12 +99,21 @@ class SessionWriter(dir: File, private val embeddingDim: Int) : AutoCloseable {
      * [frameIndex] must equal the number of frames already written - it is asserted, not trusted,
      * because a silently dropped frame would corrupt every label after it.
      */
+    /**
+     * [adScore] and [adSmoothed] are the head's own output for this frame, or NaN when no head is
+     * loaded. They are written so trainer/parity_check.py can confirm the phone computes the same
+     * score the desktop does for the same embeddings - a train/serve mismatch would not crash, it
+     * would quietly degrade, so it has to be checked against a real session rather than assumed.
+     */
     fun writeFrame(
         frameIndex: Long,
         embedding: FloatArray,
         rmsDbfs: Float,
         topIdx: IntArray,
-        topScore: FloatArray
+        topScore: FloatArray,
+        adScore: Float = Float.NaN,
+        adSmoothed: Float = Float.NaN,
+        muted: Boolean = false
     ) {
         if (closed) return
         check(frameIndex == framesWritten) {
@@ -135,7 +144,13 @@ class SessionWriter(dir: File, private val embeddingDim: Int) : AutoCloseable {
             if (i > 0) sb.append(',')
             sb.append(fmt(topScore[i]))
         }
-        sb.append("]}")
+        sb.append("]")
+        if (!adScore.isNaN()) {
+            sb.append(""","ad":""").append(fmt(adScore))
+                .append(""","ads":""").append(fmt(adSmoothed))
+                .append(""","mute":""").append(if (muted) 1 else 0)
+        }
+        sb.append("}")
         meta.write(sb.toString())
         meta.newLine()
 
