@@ -62,8 +62,13 @@ class ScopeView(context: Context) : View(context) {
         return (ln(q / (1.0 - q))).toFloat().coerceIn(-LIMIT, LIMIT)
     }
 
-    private fun xOf(score: Float) = plot.left + (warp(score) + LIMIT) / (2 * LIMIT) * plot.width()
-    private fun yOf(music: Float) = plot.bottom - music.coerceIn(0f, 1f) * plot.height()
+    private fun xOf(score: Float) =
+        (plot.left + (warp(score) + LIMIT) / (2 * LIMIT) * plot.width())
+            .coerceIn(plot.left + INSET, plot.right - INSET)
+
+    private fun yOf(music: Float) =
+        (plot.bottom - music.coerceIn(0f, 1f) * plot.height())
+            .coerceIn(plot.top + INSET, plot.bottom - INSET)
 
     override fun onDraw(canvas: Canvas) {
         val padL = 8f
@@ -87,9 +92,14 @@ class ScopeView(context: Context) : View(context) {
             val lbl = if (t >= 0.99f) "0.99" else if (t <= 0.01f) "0.01" else t.toString()
             canvas.drawText(lbl, x - textPaint.measureText(lbl) / 2, height - 12f, textPaint)
         }
+        for (m in floatArrayOf(0.25f, 0.5f, 0.75f)) {
+            val yy = plot.bottom - m * plot.height()
+            canvas.drawLine(plot.left, yy, plot.right, yy, gridPaint)
+        }
         canvas.drawRect(plot, gridPaint)
 
-        canvas.drawText("music", plot.left + 8f, plot.top + 24f, textPaint)
+        canvas.drawText("music 1.0", plot.left + 8f, plot.top + 24f, textPaint)
+        canvas.drawText("0.5", plot.left + 8f, plot.bottom - plot.height() / 2 - 6f, textPaint)
         val axis = "ad score"
         canvas.drawText(axis, plot.right - textPaint.measureText(axis) - 8f,
             plot.bottom - 10f, textPaint)
@@ -124,12 +134,15 @@ class ScopeView(context: Context) : View(context) {
 
         val read = String.format("p=%.3f  music=%.2f%s", sScore[i], sMusic[i],
             if (muted) "  MUTED" else "")
-        canvas.drawText(read, plot.left + 8f, plot.bottom - 10f, textPaint)
+        canvas.drawText(read, plot.right - textPaint.measureText(read) - 8f,
+            plot.top + 24f, textPaint)
     }
 
     companion object {
         /** Log-odds range shown. +-7 covers p from about 0.001 to 0.999. */
         private const val LIMIT = 7f
+        /** Keeps the marker clear of the frame at the extremes. */
+        private const val INSET = 16f
         private val TICKS = floatArrayOf(0.01f, 0.1f, 0.5f, 0.9f, 0.99f)
     }
 }
