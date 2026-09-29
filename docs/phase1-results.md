@@ -487,7 +487,8 @@ across the ten taps, then a linear layer over time. A plain hidden layer on the 
 would be 656k weights fitted to 85 breaks; this one is 16k at 16 units, and keeps the property the
 linear head's fast path rests on - each base frame is transformed once and the context indexes
 rows that already exist. On the phone it costs one 1025x16 product per frame plus a 160-term dot
-product, about half of YAMNet's final layer and less than the linear head's 10,250 multiply-adds.
+product - 16.6k multiply-adds against the linear head's 10.3k, and both are rounding error next to
+YAMNet's roughly 69 million.
 
 | head | saved/h | best rule | median entry | frame precision / recall |
 |---|---|---|---|---|
