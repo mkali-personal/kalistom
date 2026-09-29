@@ -1,0 +1,451 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Label editor</title>
+<style>
+  :root {
+    --bg: #f6f6f4; --panel: #ffffff; --ink: #1d1d1f; --muted: #6b6b70; --line: #deded9;
+    --accent: #2f6fdf; --label: rgba(230, 120, 30, 0.30); --label-edge: #d86a10;
+    --sel: rgba(47, 111, 223, 0.30); --sel-edge: #2f6fdf; --join: #c02a2a; --play: #111;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #17171a; --panel: #1f1f23; --ink: #ececef; --muted: #9a9aa2; --line: #34343a;
+      --accent: #6c9cff; --label: rgba(255, 150, 60, 0.28); --label-edge: #ff9a3c;
+      --sel: rgba(108, 156, 255, 0.32); --sel-edge: #6c9cff; --join: #ff6b6b; --play: #fff;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--ink);
+    font: 13px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  #app { display: grid; grid-template-columns: 270px 1fr; height: 100vh; }
+  #side { border-right: 1px solid var(--line); background: var(--panel); display: flex;
+    flex-direction: column; min-height: 0; }
+  #filter { margin: 10px; padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px;
+    background: var(--bg); color: var(--ink); }
+  #files { overflow-y: auto; flex: 1; padding-bottom: 12px; }
+  .group { padding: 10px 12px 4px; color: var(--muted); font-size: 11px; text-transform: uppercase;
+    letter-spacing: .06em; }
+  .file { padding: 5px 12px; cursor: pointer; display: flex; justify-content: space-between;
+    gap: 8px; white-space: nowrap; }
+  .file:hover { background: var(--bg); }
+  .file.on { background: var(--sel); }
+  .file .meta { color: var(--muted); font-variant-numeric: tabular-nums; }
+  .badge { font-size: 10px; padding: 1px 5px; border-radius: 8px; margin-left: 4px; }
+  .b-truth { background: #2e9b4f; color: #fff; }
+  .b-claude, .b-gemini, .b-draft { background: #d8891b; color: #fff; }
+  .b-none { background: var(--line); color: var(--muted); }
+  #main { display: flex; flex-direction: column; min-width: 0; }
+  #bar { display: flex; align-items: center; gap: 10px; padding: 8px 12px; border-bottom:
+    1px solid var(--line); background: var(--panel); flex-wrap: wrap; }
+  #bar button { padding: 5px 10px; border: 1px solid var(--line); border-radius: 6px;
+    background: var(--bg); color: var(--ink); cursor: pointer; }
+  #bar button:hover { border-color: var(--accent); }
+  #title { font-weight: 600; }
+  #dirty { width: 8px; height: 8px; border-radius: 50%; background: #d8891b; visibility: hidden; }
+  .readout { color: var(--muted); font-variant-numeric: tabular-nums; }
+  #wrap { flex: 1; position: relative; min-height: 0; }
+  canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+  #help { padding: 6px 12px; color: var(--muted); border-top: 1px solid var(--line);
+    background: var(--panel); font-size: 12px; }
+  kbd { font: 11px ui-monospace, monospace; border: 1px solid var(--line); border-bottom-width: 2px;
+    border-radius: 4px; padding: 0 4px; }
+  #empty { position: absolute; inset: 0; display: grid; place-items: center; color: var(--muted); }
+</style>
+</head>
+<body>
+<div id="app">
+  <aside id="side">
+    <input id="filter" placeholder="Filter recordings">
+    <div id="files"></div>
+  </aside>
+  <main id="main">
+    <div id="bar">
+      <span id="title">No recording</span><span id="dirty" title="Unsaved changes"></span>
+      <span id="src" class="readout"></span>
+      <button id="add">Add label (A)</button>
+      <button id="save">Save (Ctrl+S)</button>
+      <span class="readout" id="clock"></span>
+      <span class="readout" id="selinfo"></span>
+      <span class="readout" id="zoom"></span>
+    </div>
+    <div id="wrap"><canvas id="cv"></canvas><div id="empty">Pick a recording on the left.</div></div>
+    <div id="help">
+      <kbd>Space</kbd> play/pause · <kbd>←</kbd><kbd>→</kbd> 5 s · <kbd>Shift</kbd> 10 s ·
+      <kbd>Ctrl</kbd> 30 s · <kbd>[</kbd><kbd>]</kbd> previous/next label · <kbd>+</kbd><kbd>-</kbd>
+      or <kbd>Ctrl</kbd>+wheel zoom · wheel pans · drag on the label track to create · drag edges to
+      resize · double-click to rename · <kbd>Del</kbd> delete · <kbd>Esc</kbd> deselect
+    </div>
+  </main>
+</div>
+<audio id="au" preload="auto"></audio>
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+const cv = $("cv"), ctx = cv.getContext("2d"), au = $("au");
+const RULER = 22, TRACK = 56, EDGE = 6, MIN_SPAN = 5;
+
+const store = {
+  get(k, d) { try { const v = localStorage.getItem(k); return v === null ? d : JSON.parse(v); } catch { return d; } },
+  set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} },
+};
+
+let files = [], cur = null;             // cur: {name, seconds, labels, joins, source}
+let view = { t0: 0, span: 60 };
+let sel = -1, dirty = false;
+let spec = null;                        // {t0, t1, img: canvas}
+let specWant = "", specTimer = 0;
+let drag = null;
+
+// ---------- colour map: dark blue -> teal -> yellow, one lookup per byte value
+const LUT = (() => {
+  const stops = [[0, [13, 8, 40]], [0.35, [40, 60, 140]], [0.6, [30, 150, 140]],
+                 [0.85, [180, 210, 60]], [1, [250, 240, 160]]];
+  const out = new Uint8ClampedArray(256 * 3);
+  for (let i = 0; i < 256; i++) {
+    const x = i / 255;
+    let k = 0; while (k < stops.length - 2 && x > stops[k + 1][0]) k++;
+    const [xa, ca] = stops[k], [xb, cb] = stops[k + 1], f = (x - xa) / (xb - xa);
+    for (let c = 0; c < 3; c++) out[i * 3 + c] = ca[c] + (cb[c] - ca[c]) * f;
+  }
+  return out;
+})();
+
+// ---------- geometry
+function size() {
+  const r = $("wrap").getBoundingClientRect(), d = devicePixelRatio || 1;
+  cv.width = Math.round(r.width * d); cv.height = Math.round(r.height * d);
+  ctx.setTransform(d, 0, 0, d, 0, 0);
+  return r;
+}
+let box = size();
+const W = () => box.width, H = () => box.height;
+const specTop = () => RULER, specH = () => Math.max(H() - RULER - TRACK, 40);
+const trackTop = () => RULER + specH();
+const x2t = (x) => view.t0 + (x / W()) * view.span;
+const t2x = (t) => ((t - view.t0) / view.span) * W();
+
+function clampView() {
+  const dur = cur ? cur.seconds : 60;
+  view.span = Math.min(Math.max(view.span, MIN_SPAN), Math.max(dur, MIN_SPAN));
+  view.t0 = Math.min(Math.max(view.t0, 0), Math.max(dur - view.span, 0));
+}
+
+function fmt(t, frac = 1) {
+  const s = Math.max(t, 0), h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60);
+  const sec = (s % 60).toFixed(frac).padStart(frac ? 3 + frac : 2, "0");
+  return (h ? h + ":" + String(m).padStart(2, "0") : String(m)) + ":" + sec;
+}
+
+// ---------- spectrogram fetching
+function requestSpec() {
+  if (!cur) return;
+  const cols = Math.max(Math.round(W()), 50);
+  const t0 = view.t0, t1 = view.t0 + view.span;
+  const key = `${cur.name}|${t0.toFixed(3)}|${t1.toFixed(3)}|${cols}`;
+  if (key === specWant) return;
+  specWant = key;
+  clearTimeout(specTimer);
+  specTimer = setTimeout(async () => {
+    const name = cur.name;
+    const r = await fetch(`/api/spec?name=${encodeURIComponent(name)}&t0=${t0}&t1=${t1}&cols=${cols}`);
+    if (!r.ok || key !== specWant || !cur || cur.name !== name) return;
+    const n = +r.headers.get("X-Cols"), b = +r.headers.get("X-Bands");
+    const data = new Uint8Array(await r.arrayBuffer());
+    const off = document.createElement("canvas"); off.width = n; off.height = b;
+    const oc = off.getContext("2d"), im = oc.createImageData(n, b);
+    for (let c = 0; c < n; c++) {
+      for (let f = 0; f < b; f++) {
+        const v = data[c * b + f], p = ((b - 1 - f) * n + c) * 4;      // low frequencies at the bottom
+        im.data[p] = LUT[v * 3]; im.data[p + 1] = LUT[v * 3 + 1]; im.data[p + 2] = LUT[v * 3 + 2];
+        im.data[p + 3] = 255;
+      }
+    }
+    oc.putImageData(im, 0, 0);
+    spec = { t0, t1, img: off };
+  }, 60);
+}
+
+// ---------- drawing
+function draw() {
+  const w = W(), h = H(), css = getComputedStyle(document.documentElement);
+  const col = (v) => css.getPropertyValue(v).trim();
+  ctx.clearRect(0, 0, w, h);
+  if (!cur) return;
+  // spectrogram, drawn where it belongs even while a newer one loads
+  ctx.fillStyle = "#0d0828"; ctx.fillRect(0, specTop(), w, specH());
+  if (spec) {
+    const x0 = t2x(spec.t0), x1 = t2x(spec.t1);
+    ctx.imageSmoothingEnabled = view.span < 120;
+    ctx.drawImage(spec.img, x0, specTop(), x1 - x0, specH());
+  }
+  // ruler
+  ctx.fillStyle = col("--panel"); ctx.fillRect(0, 0, w, RULER);
+  const steps = [1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 900, 1800];
+  const step = steps.find((s) => (s / view.span) * w >= 70) || 3600;
+  ctx.fillStyle = col("--muted"); ctx.strokeStyle = col("--line");
+  ctx.font = "11px system-ui, sans-serif"; ctx.textBaseline = "middle";
+  for (let t = Math.ceil(view.t0 / step) * step; t <= view.t0 + view.span; t += step) {
+    const x = Math.round(t2x(t)) + 0.5;
+    ctx.beginPath(); ctx.moveTo(x, RULER - 6); ctx.lineTo(x, RULER); ctx.stroke();
+    ctx.fillText(fmt(t, 0), x + 3, RULER / 2);
+  }
+  // label track
+  const ty = trackTop();
+  ctx.fillStyle = col("--panel"); ctx.fillRect(0, ty, w, TRACK);
+  ctx.strokeStyle = col("--line"); ctx.beginPath(); ctx.moveTo(0, ty + 0.5); ctx.lineTo(w, ty + 0.5); ctx.stroke();
+  cur.labels.forEach((L, i) => {
+    const x0 = t2x(L.s), x1 = t2x(L.e);
+    if (x1 < 0 || x0 > w) return;
+    const on = i === sel;
+    ctx.fillStyle = on ? col("--sel") : col("--label");
+    ctx.fillRect(x0, ty + 6, x1 - x0, TRACK - 12);
+    ctx.fillRect(x0, specTop(), x1 - x0, 4);                            // a tick on the spectrogram too
+    ctx.strokeStyle = on ? col("--sel-edge") : col("--label-edge"); ctx.lineWidth = on ? 2 : 1;
+    ctx.strokeRect(x0 + 0.5, ty + 6.5, x1 - x0 - 1, TRACK - 13);
+    ctx.lineWidth = 1;
+    ctx.save(); ctx.beginPath(); ctx.rect(x0, ty, x1 - x0, TRACK); ctx.clip();
+    ctx.fillStyle = col("--ink"); ctx.fillText(L.text || "ad", Math.max(x0, 0) + 5, ty + TRACK / 2);
+    ctx.restore();
+  });
+  // joins: the seams where audio is missing
+  ctx.strokeStyle = col("--join"); ctx.setLineDash([4, 3]);
+  for (const j of cur.joins) {
+    const x = Math.round(t2x(j)) + 0.5; if (x < 0 || x > w) continue;
+    ctx.beginPath(); ctx.moveTo(x, specTop()); ctx.lineTo(x, ty + TRACK); ctx.stroke();
+  }
+  ctx.setLineDash([]);
+  // playhead
+  const px = Math.round(t2x(au.currentTime || 0)) + 0.5;
+  ctx.strokeStyle = col("--play"); ctx.lineWidth = 1.5;
+  ctx.beginPath(); ctx.moveTo(px, 0); ctx.lineTo(px, ty + TRACK); ctx.stroke(); ctx.lineWidth = 1;
+}
+
+function readouts() {
+  $("dirty").style.visibility = dirty ? "visible" : "hidden";
+  $("clock").textContent = cur ? `${fmt(au.currentTime || 0)} / ${fmt(cur.seconds, 0)}` : "";
+  const L = cur && cur.labels[sel];
+  $("selinfo").textContent = L ? `selected ${fmt(L.s)} – ${fmt(L.e)} (${(L.e - L.s).toFixed(1)} s)` : "";
+  $("zoom").textContent = cur ? `view ${view.span < 120 ? view.span.toFixed(0) + " s" : (view.span / 60).toFixed(1) + " min"}` : "";
+}
+
+function frame() {
+  if (cur && !au.paused) {                                              // keep the playhead on screen
+    const t = au.currentTime;
+    if (t > view.t0 + view.span * 0.95 || t < view.t0) { view.t0 = t - view.span * 0.05; clampView(); }
+  }
+  requestSpec(); draw(); readouts();
+  requestAnimationFrame(frame);
+}
+
+// ---------- files
+async function loadFiles() {
+  files = await (await fetch("/api/files")).json();
+  renderFiles();
+  // ?file=sessions/sess_X opens that recording directly; otherwise the last one opened.
+  const want = new URLSearchParams(location.search).get("file") || store.get("last", null);
+  if (want && files.some((f) => f.name === want)) openFile(want);
+}
+
+function renderFiles() {
+  const q = $("filter").value.toLowerCase(), box = $("files");
+  box.innerHTML = "";
+  for (const g of ["stitched", "sessions"]) {
+    const list = files.filter((f) => f.group === g && f.stem.toLowerCase().includes(q));
+    if (!list.length) continue;
+    const hd = document.createElement("div"); hd.className = "group"; hd.textContent = g; box.append(hd);
+    for (const f of list) {
+      const el = document.createElement("div");
+      el.className = "file" + (cur && cur.name === f.name ? " on" : "");
+      el.innerHTML = `<span>${f.stem.replace(/^(run|sess)_/, "")}<span class="badge b-${f.source}">${f.source}</span></span>` +
+                     `<span class="meta">${(f.seconds / 60).toFixed(0)}m</span>`;
+      el.onclick = () => openFile(f.name);
+      box.append(el);
+    }
+  }
+  const on = box.querySelector(".file.on");
+  if (on) on.scrollIntoView({ block: "nearest" });
+}
+
+async function openFile(name) {
+  if (dirty && !confirm("Discard unsaved changes to this recording?")) return;
+  const doc = await (await fetch(`/api/labels?name=${encodeURIComponent(name)}`)).json();
+  if (doc.error) { alert(doc.error); return; }
+  cur = doc; sel = -1; dirty = false; spec = null; specWant = "";
+  $("empty").style.display = "none";
+  $("title").textContent = name.split("/")[1];
+  $("src").textContent = `labels from .${doc.source}${doc.source === "truth" ? "" : " — saving writes .truth.txt"}`;
+  au.src = `/audio?name=${encodeURIComponent(name)}`;
+  let v = store.get("view:" + name, null);
+  const url = new URLSearchParams(location.search);                    // ?file=...&t=400 jumps there
+  if (url.get("file") === name && url.get("t") !== null) v = { t0: +url.get("t"), span: 300, t: +url.get("t") };
+  view = v ? { t0: v.t0, span: v.span } : { t0: 0, span: Math.min(120, doc.seconds || 120) };
+  clampView();
+  au.currentTime = v ? v.t : 0;
+  store.set("last", name);
+  renderFiles();
+}
+
+async function save() {
+  if (!cur) return;
+  const r = await fetch(`/api/labels?name=${encodeURIComponent(cur.name)}`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ labels: cur.labels }),
+  });
+  const doc = await r.json();
+  if (doc.error) { alert("Save failed: " + doc.error); return; }
+  dirty = false; cur.source = "truth";
+  $("src").textContent = `saved ${doc.saved} (${doc.count} labels)`;
+  const f = files.find((x) => x.name === cur.name); if (f) f.source = "truth";
+  renderFiles();
+}
+
+function remember() { if (cur) store.set("view:" + cur.name, { t0: view.t0, span: view.span, t: au.currentTime }); }
+setInterval(remember, 2000);
+window.addEventListener("beforeunload", (e) => { remember(); if (dirty) { e.preventDefault(); e.returnValue = ""; } });
+
+// ---------- editing
+function touch() { cur.labels.sort((a, b) => a.s - b.s); dirty = true; }
+function selectLabel(L) { sel = cur.labels.indexOf(L); }
+
+function addLabel() {
+  if (!cur) return;
+  const s = au.currentTime || view.t0, L = { s, e: Math.min(s + 20, cur.seconds), text: "ad" };
+  if (L.e - L.s < 0.5) return;
+  cur.labels.push(L); touch(); selectLabel(L);
+}
+
+function jumpLabel(dir) {
+  if (!cur || !cur.labels.length) return;
+  const t = au.currentTime + (dir > 0 ? 0.05 : -0.05);
+  const L = dir > 0 ? cur.labels.find((x) => x.s > t) : [...cur.labels].reverse().find((x) => x.s < t);
+  if (!L) return;
+  selectLabel(L); au.currentTime = L.s; show(L.s);
+}
+
+function hit(x, y) {
+  if (y < trackTop() || y > trackTop() + TRACK) return null;
+  let best = null;
+  cur.labels.forEach((L) => {
+    const x0 = t2x(L.s), x1 = t2x(L.e);
+    if (Math.abs(x - x0) <= EDGE) best = { L, part: "s" };
+    else if (Math.abs(x - x1) <= EDGE) best = best || { L, part: "e" };
+    else if (x > x0 && x < x1 && !best) best = { L, part: "move" };
+  });
+  return best;
+}
+
+cv.addEventListener("mousedown", (ev) => {
+  if (!cur) return;
+  const r = cv.getBoundingClientRect(), x = ev.clientX - r.left, y = ev.clientY - r.top;
+  const t = x2t(x);
+  if (y >= trackTop()) {
+    const h = hit(x, y);
+    if (h) { selectLabel(h.L); drag = { ...h, t0: t, s0: h.L.s, e0: h.L.e }; }
+    else { const L = { s: t, e: t, text: "ad" }; cur.labels.push(L); selectLabel(L); drag = { L, part: "new", t0: t }; }
+  } else {
+    au.currentTime = Math.min(Math.max(t, 0), cur.seconds);
+    drag = { part: "seek" };
+  }
+});
+
+window.addEventListener("mousemove", (ev) => {
+  const r = cv.getBoundingClientRect(), x = ev.clientX - r.left, y = ev.clientY - r.top;
+  if (!drag) {
+    const h = cur && hit(x, y);
+    cv.style.cursor = h ? (h.part === "move" ? "grab" : "ew-resize") : (y < trackTop() ? "text" : "crosshair");
+    return;
+  }
+  const t = Math.min(Math.max(x2t(x), 0), cur.seconds), L = drag.L;
+  if (drag.part === "seek") au.currentTime = t;
+  else if (drag.part === "s") L.s = Math.min(t, L.e - 0.2);
+  else if (drag.part === "e") L.e = Math.max(t, L.s + 0.2);
+  else if (drag.part === "new") { L.s = Math.min(drag.t0, t); L.e = Math.max(drag.t0, t); }
+  else if (drag.part === "move") {
+    const d = Math.min(Math.max(t - drag.t0, -drag.s0), cur.seconds - drag.e0);
+    L.s = drag.s0 + d; L.e = drag.e0 + d;
+  }
+  if (drag.part !== "seek") dirty = true;
+});
+
+window.addEventListener("mouseup", () => {
+  if (drag && drag.part === "new") {
+    const L = drag.L;
+    if (L.e - L.s < 0.3) {                                   // a click, not a drag: just seek there
+      cur.labels.splice(cur.labels.indexOf(L), 1); sel = -1; au.currentTime = L.s;
+    }
+  }
+  if (drag && drag.part !== "seek") { const L = drag.L; touch(); if (cur.labels.includes(L)) selectLabel(L); }
+  drag = null;
+});
+
+cv.addEventListener("dblclick", (ev) => {
+  const r = cv.getBoundingClientRect(), h = cur && hit(ev.clientX - r.left, ev.clientY - r.top);
+  if (!h) return;
+  const text = prompt("Label text", h.L.text || "ad");
+  if (text !== null) { h.L.text = text.trim() || "ad"; dirty = true; }
+});
+
+cv.addEventListener("wheel", (ev) => {
+  if (!cur) return;
+  ev.preventDefault();
+  const r = cv.getBoundingClientRect(), x = ev.clientX - r.left;
+  if (ev.ctrlKey) zoom(Math.exp(ev.deltaY * 0.002), x2t(x));
+  else { view.t0 += ((ev.deltaX || ev.deltaY) / 800) * view.span; clampView(); }
+}, { passive: false });
+
+function zoom(f, about) {
+  const a = about === undefined ? (au.currentTime || view.t0 + view.span / 2) : about;
+  const k = (a - view.t0) / view.span;
+  view.span *= f; clampView();
+  view.t0 = a - k * view.span; clampView();
+}
+
+// Bring t into view if it is off screen. Not done every frame while paused: panning away from the
+// playhead with the wheel is deliberate, and the view should not snap back.
+function show(t) {
+  if (t < view.t0 || t > view.t0 + view.span) { view.t0 = t - view.span * 0.1; clampView(); }
+}
+
+function skip(d) {
+  if (!cur) return;
+  au.currentTime = Math.min(Math.max(au.currentTime + d, 0), cur.seconds);
+  show(au.currentTime);
+}
+
+window.addEventListener("keydown", (ev) => {
+  if (ev.target instanceof HTMLInputElement) return;
+  if ((ev.ctrlKey || ev.metaKey) && ev.key.toLowerCase() === "s") { ev.preventDefault(); save(); return; }
+  if (!cur) return;
+  const k = ev.key;
+  const step = ev.ctrlKey || ev.metaKey ? 30 : ev.shiftKey ? 10 : 5;
+  if (k === " ") { ev.preventDefault(); au.paused ? au.play() : au.pause(); }
+  else if (k === "ArrowRight") { ev.preventDefault(); skip(step); }
+  else if (k === "ArrowLeft") { ev.preventDefault(); skip(-step); }
+  else if (k === "]" || k === "PageDown") { ev.preventDefault(); jumpLabel(1); }
+  else if (k === "[" || k === "PageUp") { ev.preventDefault(); jumpLabel(-1); }
+  else if (k === "+" || k === "=") zoom(0.5);
+  else if (k === "-" || k === "_") zoom(2);
+  else if (k === "Delete" || k === "Backspace") {
+    if (sel >= 0) { ev.preventDefault(); cur.labels.splice(sel, 1); sel = -1; dirty = true; }
+  }
+  else if (k === "a" || k === "A") addLabel();
+  else if (k === "Escape") sel = -1;
+  else if (k === "Home") { au.currentTime = 0; view.t0 = 0; }
+  else if (k === "End") { au.currentTime = cur.seconds; view.t0 = cur.seconds; clampView(); }
+});
+
+$("add").onclick = addLabel;
+// A clicked button keeps focus, and Space would then press it again instead of playing.
+document.querySelectorAll("button").forEach((b) => b.addEventListener("mousedown", (e) => e.preventDefault()));
+$("save").onclick = save;
+$("filter").oninput = renderFiles;
+window.addEventListener("resize", () => { box = size(); specWant = ""; });
+
+loadFiles();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

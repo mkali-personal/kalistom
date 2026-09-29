@@ -22,6 +22,35 @@ overwrote the join markers would destroy the only record of where the audio is d
 
 ## Marking by hand
 
+### In the label editor
+
+    python trainer/label_editor.py
+
+This opens a page in the browser listing every recording in `captures/stitched` and
+`captures/sessions`, each with a badge showing what labels it already has. Pick one, and its
+spectrogram, its join markers (dashed red lines) and its best existing labels are already loaded.
+It shows `.truth.txt` if there is one, and otherwise the machine draft.
+
+| Action | How |
+|---|---|
+| Play / pause | `Space` |
+| Skip 5 / 10 / 30 s | `←` `→`, with `Shift`, with `Ctrl` |
+| Previous / next label | `[` `]` (or `PageUp` / `PageDown`) |
+| Zoom | `+` `-`, or `Ctrl` + mouse wheel. The plain wheel pans. |
+| Seek | Click the spectrogram. |
+| New label | Drag on the label track, or press `A` for a 20 s label at the playhead. |
+| Adjust a label | Drag its edges, or drag the middle to move it. Double-click to rename it. |
+| Delete | Click the label, then press `Del`. |
+| Save | `Ctrl+S` |
+
+Saving always writes `<stem>.truth.txt`, and keeps the previous version as `.truth.txt.bak`. The
+draft it started from is never touched, so `compare_labels.py` can still measure how far the
+draft was from the correction.
+
+Adding `?file=sessions/sess_X&t=400` to the page's address opens that recording at 400 s.
+
+### In Audacity
+
 1. Open the `.wav` in Audacity.
 2. Switch the track to **Spectrogram** view from the track's dropdown menu. Ad breaks are visible
    before they are audible — commercials are dynamic-range compressed, so they appear as a denser,
