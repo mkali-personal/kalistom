@@ -1,0 +1,5 @@
+{
+  "content_started_local": "2026-09-15T08:23:37+03:00",
+  "recorded_started_local": "2026-09-15T10:21:51+03:00",
+  "why": "Continues sess_20260915_094131, which plays the broadcast 1 h 58 min 14 s behind live (its 08:00 bulletin starts 16:43 in). This session has no time cue of its own, so the same lag is assumed: playback carried on across the eight-second gap between the two files."
+}
