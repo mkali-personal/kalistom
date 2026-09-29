@@ -459,3 +459,63 @@ Every number in this document rests on labels drafted by a model and reviewed, n
 made independently. One recording hand-labelled without looking at the draft would let
 `compare_labels.py` measure how much of the residual error is the labelling rather than the model.
 That remains the largest unquantified term in all of this.
+
+## A small nonlinear head beats the linear one (2026-09-29)
+
+Same 33 recordings, same leave-one-recording-out folds, scored the way the app is judged: ad-seconds
+saved per hour on the 07:00-11:00 pool, at no more than 10 content-seconds lost, after the best
+smoothing rule from `smooth.py`.
+
+### The linear head was already at its best
+
+32 of 33 folds had stopped at the 500-iteration cap, so the first suspicion was an unconverged fit
+and an untuned `--l2`. Neither was hiding anything:
+
+| logistic regression | saved/h |
+|---|---|
+| l2 1e-3, 500 iterations (the shipped head) | 417 |
+| l2 1e-3, converged | 418 |
+| l2 1e-2 | 380 |
+| l2 1e-1 | 325 |
+
+Stronger regularisation only hurts, and letting 1e-3 converge changes nothing.
+
+### The network
+
+`trainer/context_mlp.py`: one hidden layer applied to each 1025-d frame *separately* and shared
+across the ten taps, then a linear layer over time. A plain hidden layer on the 10,250-wide stack
+would be 656k weights fitted to 85 breaks; this one is 16k at 16 units, and keeps the property the
+linear head's fast path rests on - each base frame is transformed once and the context indexes
+rows that already exist. On the phone it costs one 1025x16 product per frame plus a 160-term dot
+product, about half of YAMNet's final layer and less than the linear head's 10,250 multiply-adds.
+
+| head | saved/h | best rule | median entry | frame precision / recall |
+|---|---|---|---|---|
+| logistic regression | 418 | ema 2 s | 10.3 s | 78.2 % / 93.6 % |
+| **MLP, 16 units, wd 1e-2** | **445** | rolling 1 s | **3.8 s** | 81.4 % / 95.1 % |
+| MLP, 32 units, wd 1e-1 | 438 | hysteresis | 2.4 s | 82.8 % / 95.2 % |
+| MLP, 32 units, wd 1e-2 | 435 | ema 0.5 s | 5.8 s | 82.8 % / 95.1 % |
+
+All three settings beat the linear head, which argues the gain is real rather than one lucky
+configuration. The larger margin is in *when* it mutes rather than whether: its score is clean
+enough to need almost no smoothing, so it enters a break seconds earlier, and bare hysteresis on
+its output (433) nearly matches the linear head's best smoothed rule. The usual caveat applies to
+every row equally: the rule and thresholds are chosen on the predictions they are scored on.
+
+### The live app, scored against a fresh morning
+
+The phone ran the shipped linear head through the whole 2 h 13 min session of 29 September, which
+no model has trained on. Against labels drafted from its transcript:
+
+| per hour | |
+|---|---|
+| advertising broadcast | 539 s |
+| removed | **387 s** |
+| heard | 152 s |
+| content wrongly muted | **7 s** |
+
+In line with the offline estimate, so the evaluation predicts the device. Nearly all of what leaks
+is entry latency - muting typically starts 8-9 s into a break - which is exactly what the network
+head improves. And with content loss at 7 s/h, below the 10 s/h budget, there is room to lower the
+thresholds: the user's own listening agrees that the app misses ads but essentially never mutes
+programme.

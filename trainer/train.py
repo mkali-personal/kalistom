@@ -36,6 +36,7 @@ from pathlib import Path
 
 import numpy as np
 
+import context_mlp
 from context_lr import ContextDesign, fit, predict
 from labels import DROP, HOP_S, POSITIVE, frame_labels, read_points, read_spans, summarise
 from rectime import describe, in_hours, parse_window, started_at
@@ -279,6 +280,13 @@ def main() -> int:
     ap.add_argument("--exclude-hours", default="", metavar="HH-HH",
                     help="the opposite: drop recordings whose midpoint falls in the window, "
                          "e.g. --exclude-hours 00:30-05:30 to leave out the dead of night")
+    ap.add_argument("--head", choices=("lr", "mlp"), default="lr",
+                    help="lr: logistic regression over the stack. mlp: one hidden layer shared "
+                         "across taps, then linear over time - see context_mlp.py")
+    ap.add_argument("--hidden", type=int, default=32, help="mlp: hidden units per frame")
+    ap.add_argument("--wd", type=float, default=1e-2, help="mlp: AdamW weight decay")
+    ap.add_argument("--dropout", type=float, default=0.2, help="mlp: dropout on the inputs")
+    ap.add_argument("--epochs", type=int, default=8, help="mlp: fixed, never early-stopped")
     ap.add_argument("--l2", type=float, default=1e-3)
     ap.add_argument("--iters", type=int, default=3000)
     ap.add_argument("--folds", type=int, default=5)
@@ -287,6 +295,11 @@ def main() -> int:
     ap.add_argument("--off", type=float, default=0.2, help="stop attenuating below this")
     ap.add_argument("--out", default="", help="write head weights here as JSON")
     ap.add_argument("--save-oof", default="", help="save out-of-fold predictions as .npz")
+    ap.add_argument("--fold-cache", default="",
+                    help="save each fold's held-out predictions here as it finishes, and skip "
+                         "folds already saved - so a run killed partway resumes instead of "
+                         "starting over. One directory per configuration: nothing checks that "
+                         "a cached fold was trained with the same flags")
     args = ap.parse_args()
 
     if args.dir:
@@ -448,6 +461,20 @@ def main() -> int:
     # everything after it into the wrong context. Dropped rows carry zero weight instead.
     yf = (y == POSITIVE).astype(np.float64)
     oof = np.zeros(len(y), dtype=np.float32)
+
+    def train_head(rows, mu, sd):
+        if args.head == "mlp":
+            m = context_mlp.fit(design, rows, yf, mu, sd, args.hidden, args.wd, args.dropout,
+                                args.epochs)
+            fit.last = context_mlp.fit.last
+            return m
+        return fit(design, rows, yf, mu, sd, args.l2, args.iters)
+
+    def score(w, mu, sd):
+        if args.head == "mlp":
+            return context_mlp.predict(design, w, mu, sd)
+        return predict(design, w, mu, sd)
+
     for f in range(args.folds):
         tr = keep & (fold != f)
         te = fold == f
@@ -456,17 +483,31 @@ def main() -> int:
             print(f"  {held}: one class missing in training - skipped")
             oof[te] = 0.0
             continue
+        # A multi-hour run on a desktop gets interrupted - a reboot cost one of these a night's
+        # work - so each fold is written the moment it finishes and reused if it is there.
+        cached = (Path(args.fold_cache) / f"{held.replace(' + ', '+').replace(' ', '_')}.npy"
+                  if args.fold_cache else None)
+        if cached and cached.exists():
+            saved = np.load(cached)
+            if len(saved) == int(te.sum()):
+                oof[te] = saved
+                print(f"  held out: {held} [from {cached}]")
+                continue
+            print(f"  {cached} has {len(saved)} rows, fold has {int(te.sum())} - retraining")
         t0 = time.time()
         mu, sd = design.mean_std(tr)
-        w = fit(design, tr, yf, mu, sd, args.l2, args.iters)
-        oof[te] = predict(design, w, mu, sd)[te]
+        w = train_head(tr, mu, sd)
+        oof[te] = score(w, mu, sd)[te]
+        if cached:
+            cached.parent.mkdir(parents=True, exist_ok=True)
+            np.save(cached, oof[te])
         if (keep & te).sum():
             report(y[te], oof[te], args.on, args.off,
                    f"  held out: {held} [{time.time() - t0:.0f}s, {fit.last}]")
 
     mu_full, sd_full = design.mean_std(keep)
-    w_full = fit(design, keep, yf, mu_full, sd_full, args.l2, args.iters)
-    report(y, predict(design, w_full, mu_full, sd_full), args.on, args.off,
+    w_full = train_head(keep, mu_full, sd_full)
+    report(y, score(w_full, mu_full, sd_full), args.on, args.off,
            "FIT (trained on everything - memorisation)")
     split_name = ("leave-one-recording-out" if len(recs) > 1
                   else f"{args.folds}-fold by {args.block_seconds:.0f}s block")
@@ -505,18 +546,23 @@ def main() -> int:
         print("  Held-out performance is not yet usable. More labelled breaks before more model.")
 
     if args.out:
-        Path(args.out).write_text(json.dumps({
-            "type": "logistic_regression",
-            "context_frames": args.context,
-            "uses_rms": bool(rms is not None and len(rms) == len(emb)),
+        if args.head == "mlp":
+            model = {"type": "mlp", **context_mlp.export(w_full, mu_full, sd_full)}
+        else:
             # Written in the stacked convention the phone will apply - one entry per input column,
             # oldest frame first - even though training holds one set of statistics per base
             # column and shares it across taps. Tiling here keeps the file a complete description
             # of the model, so the device never has to know how it was fitted.
+            model = {"type": "logistic_regression",
+                     "mean": np.tile(mu_full, design.taps).tolist(),
+                     "scale": np.tile(sd_full, design.taps).tolist(),
+                     "weights": w_full[:-1].tolist(), "bias": float(w_full[-1])}
+        Path(args.out).write_text(json.dumps({
+            "type": model.pop("type"),
+            "context_frames": args.context,
+            "uses_rms": bool(rms is not None and len(rms) == len(emb)),
             "input_dim": int(design.taps * design.d0),
-            "mean": np.tile(mu_full, design.taps).tolist(),
-            "scale": np.tile(sd_full, design.taps).tolist(),
-            "weights": w_full[:-1].tolist(), "bias": float(w_full[-1]),
+            **model,
             # The swept point, not the argparse defaults. --on/--off only ever set what the
             # per-fold reports were printed at; shipping them here would put thresholds in the
             # file that nothing recommended and that no number above was measured with.
