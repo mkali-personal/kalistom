@@ -128,10 +128,92 @@ def fit_mlp(Z, idx, y, train, hidden: int, wd: float, dropout: float, epochs: in
         return torch.sigmoid(s), f"{epochs} epochs, final train loss {last:.4f}"
 
 
-HEADS = {"lr": fit_lr, "mlp": fit_mlp}
+def trailing_index(bounds, n: int, width: int, device) -> tuple[torch.Tensor, torch.Tensor]:
+    """For each row: where its trailing window of `width` frames starts, and how many it holds.
+
+    The window stops at the recording's start rather than reaching into the previous one, so the
+    first frames of a recording average over fewer frames - the same way the phone's ring buffer
+    fills up."""
+    lo = np.empty(n, np.int64)
+    for a, b in bounds:
+        lo[a:b] = np.maximum(np.arange(a, b) - width + 1, a)
+    count = np.arange(n) + 1 - lo
+    return (torch.as_tensor(lo, device=device),
+            torch.as_tensor(count, dtype=torch.float32, device=device))
+
+
+def fit_pool(Z, idx, y, train, hidden: int, dense: int, windows: str, wd: float, dropout: float,
+             epochs: int, batch: int, lr: float, seed: int, bounds=None, **_):
+    """Multiple-timescale pooling: the current frame plus what the last few seconds, the last
+    quarter-minute and the last minute have sounded like on average.
+
+        h(t)  = relu(W1 . z(t) + b1)                        per frame, as in the mlp head
+        x(t)  = [h(t), mean h over last w1, w2, w3 frames]  causal, clamped at recording start
+        score = w3 . relu(W2 . x(t) + b2) + b3
+
+    A minute of average is the kind of context that says "we are inside a break" when the current
+    second is ambiguous, which the ten-frame heads cannot see. The trailing means make every row
+    depend on up to a minute of its neighbours, so each step recomputes h for ALL frames (cheap on a
+    GPU: one 172k x 1025 x H product) and takes the loss on a minibatch of rows. Dropout is applied
+    to h rather than to the 1025 inputs, which would cost a random number per input per step.
+    """
+    g = torch.Generator(device="cpu").manual_seed(seed)
+    dev, d0, n = Z.device, Z.shape[1], Z.shape[0]
+    ws = [int(w) for w in str(windows).split(",")]
+    trail = [trailing_index(bounds, n, w, dev) for w in ws]
+    feat = hidden * (1 + len(ws))
+    w1 = (torch.randn(hidden, d0, generator=g) * (2.0 / d0) ** 0.5).to(dev).requires_grad_()
+    b1 = torch.zeros(hidden, device=dev, requires_grad=True)
+    w2 = (torch.randn(dense, feat, generator=g) * (2.0 / feat) ** 0.5).to(dev).requires_grad_()
+    b2 = torch.zeros(dense, device=dev, requires_grad=True)
+    w3 = (torch.randn(1, dense, generator=g) * 0.01).to(dev).requires_grad_()
+    b3 = torch.zeros(1, device=dev, requires_grad=True)
+    opt = torch.optim.AdamW([{"params": [w1, w2, w3], "weight_decay": wd},
+                             {"params": [b1, b2, b3], "weight_decay": 0.0}], lr=lr)
+    sw = balanced_weights(y, train)
+
+    def features(train_mode: bool) -> torch.Tensor:
+        h = torch.relu(Z @ w1.T + b1)                                      # (n, hidden)
+        if train_mode and dropout:
+            h = h * (torch.rand(h.shape, device=dev) >= dropout).float() / (1.0 - dropout)
+        c = torch.cat([torch.zeros(1, hidden, device=dev, dtype=torch.float64),
+                       torch.cumsum(h.double(), 0)])
+        parts = [h]
+        for lo, cnt in trail:
+            parts.append(((c[1:] - c[lo]) / cnt[:, None]).float())       # causal trailing mean
+        return torch.cat(parts, 1)
+
+    def score_rows(x: torch.Tensor) -> torch.Tensor:
+        return (torch.relu(x @ w2.T + b2) @ w3.T).squeeze(1) + b3
+
+    rows = torch.nonzero(train).squeeze(1).cpu()
+    last = 0.0
+    for _ in range(epochs):
+        order = rows[torch.randperm(len(rows), generator=g)].to(dev)
+        total = 0.0
+        for k in range(0, len(order), batch):
+            bi = order[k:k + batch]
+            x = features(True)[bi]
+            loss_rows = sw[bi] * torch.nn.functional.binary_cross_entropy_with_logits(
+                score_rows(x), y[bi], reduction="none")
+            loss = loss_rows.mean()
+            opt.zero_grad()
+            loss.backward()
+            opt.step()
+            total += float(loss_rows.detach().sum())
+        last = total / len(rows)
+    with torch.no_grad():
+        return (torch.sigmoid(score_rows(features(False))),
+                f"{epochs} epochs, final train loss {last:.4f}")
+
+
+HEADS = {"lr": fit_lr, "mlp": fit_mlp, "pool": fit_pool}
 DEFAULTS = {"lr": {"l2": 1e-3, "iters": 3000},
             "mlp": {"hidden": 16, "wd": 1e-2, "dropout": 0.2, "epochs": 8, "batch": 512,
-                    "lr": 1e-3, "seed": 0}}
+                    "lr": 1e-3, "seed": 0},
+            # 10, 31 and 125 frames: about 5 s, 15 s and 60 s of trailing context.
+            "pool": {"hidden": 16, "dense": 32, "windows": "10,31,125", "wd": 1e-2,
+                     "dropout": 0.2, "epochs": 8, "batch": 512, "lr": 1e-3, "seed": 0}}
 
 
 # ---------------------------------------------------------------- running a pool
@@ -169,7 +251,7 @@ def run(pool: str, head: str, out: str, device: str = "auto", max_folds: int = 0
         mu = rows.double().mean(0).float()
         sd = rows.double().std(0, unbiased=False).float() + 1e-6
         Z = (E - mu) / sd
-        p, how = HEADS[head](Z, idx, y, tr, **cfg)
+        p, how = HEADS[head](Z, idx, y, tr, bounds=d["rec_bounds"], **cfg)
         te_np = te.cpu().numpy()
         oof[te_np] = p[te].float().cpu().numpy()
         scored |= te_np
@@ -200,8 +282,9 @@ def main() -> int:
     ap.add_argument("--max-folds", type=int, default=0, help="smoke test: stop after this many")
     for k in ("l2", "wd", "dropout", "lr"):
         ap.add_argument(f"--{k}", type=float)
-    for k in ("iters", "hidden", "epochs", "batch", "seed"):
+    for k in ("iters", "hidden", "dense", "epochs", "batch", "seed"):
         ap.add_argument(f"--{k}", type=int)
+    ap.add_argument("--windows", help="pool: trailing windows in frames, e.g. 10,31,125")
     a = vars(ap.parse_args())
     run(a.pop("pool"), a.pop("head"), a.pop("out"), a.pop("device"), a.pop("max_folds"), **a)
     return 0

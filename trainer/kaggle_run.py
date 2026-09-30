@@ -144,10 +144,18 @@ def wait_and_fetch(user: str, runs: list[dict], poll: int) -> Path:
     ref = f"{user}/{KERNEL_SLUG}"
     t0 = time.time()
     while True:
-        status = kaggle("kernels", "status", ref, check=False).strip().splitlines()[-1]
-        if any(w in status.lower() for w in ("complete", "error", "cancel")):
+        # Only a real answer counts. A laptop closed in a bag comes back with no network, and the
+        # client's connection error must not be mistaken for the job failing - the job is on
+        # Kaggle's machine and carries on regardless; the thing to do is ask again later.
+        reply = kaggle("kernels", "status", ref, check=False)
+        status = next((ln.strip() for ln in reply.splitlines() if "has status" in ln), None)
+        if status is None:
+            print(f"  [{(time.time() - t0) / 60:5.1f} min] no answer from Kaggle "
+                  f"(offline?) - retrying", flush=True)
+        elif any(w in status.lower() for w in ("complete", "error", "cancel")):
             break
-        print(f"  [{(time.time() - t0) / 60:5.1f} min] {status}", flush=True)
+        else:
+            print(f"  [{(time.time() - t0) / 60:5.1f} min] {status}", flush=True)
         time.sleep(poll)
     out = WORK / "out" / time.strftime("%Y%m%d_%H%M%S")
     out.mkdir(parents=True, exist_ok=True)
@@ -172,11 +180,20 @@ def main() -> int:
                     help="one torch_train.py configuration; repeat for several in one GPU session")
     ap.add_argument("--export", action="store_true",
                     help="rebuild the pool from captures/stitched and captures/sessions first")
+    ap.add_argument("--fetch", action="store_true",
+                    help="do not push: wait for the job already on Kaggle and download its "
+                         "results (give the same --run names it was pushed with)")
     ap.add_argument("--max-folds", type=int, default=0, help="smoke test: this many folds only")
     ap.add_argument("--poll", type=int, default=30, help="seconds between status checks")
     args = ap.parse_args()
 
     runs = [parse_run(s) for s in args.run]
+    if args.fetch:
+        # Rejoin a job pushed earlier - after the waiting process died, or the machine slept -
+        # without pushing anything, which would replace the job and its results.
+        out = wait_and_fetch(username(), runs, args.poll)
+        print_summary(out)
+        return 0
     if args.export or not POOL.exists():
         DATA_DIR.mkdir(parents=True, exist_ok=True)
         subprocess.run([sys.executable, str(ROOT / "trainer" / "train.py"),
@@ -188,13 +205,17 @@ def main() -> int:
     write_kernel(user, runs, args.max_folds)
     print(kaggle("kernels", "push", "-p", str(KERNEL_DIR)).strip())
     out = wait_and_fetch(user, runs, args.poll)
+    print_summary(out)
+    return 0
+
+
+def print_summary(out: Path) -> None:
     summary = out / "summary.json"
     if summary.exists():
         for name, s in json.loads(summary.read_text()).items():
             print(f"{name:14s} precision {100 * s['precision']:5.1f}%  recall "
                   f"{100 * s['recall']:5.1f}%  {s['folds']} folds in {s['seconds']:.0f}s "
                   f"on {s['device']}")
-    return 0
 
 
 if __name__ == "__main__":
