@@ -72,6 +72,12 @@ Two patterns deserve a second listen:
 - a label the score ignores throughout, which may be a labelling mistake;
 - a long stretch the score is sure of with no label under it, which may be a missed break.
 
+The second pattern has a shortcut: `F` jumps to the next place where the raw score is at or above
+the **False negative threshold** and no label covers it, and `Shift+F` jumps to the previous one.
+Each jump lands at the start of a run of such frames. The readout then shows which one you are on,
+out of how many, and how long that run lasts. A threshold of about 0.9 finds candidates; raising it
+to 0.99 leaves only the stretches the model is certain of.
+
 ### In Audacity
 
 1. Open the `.wav` in Audacity.

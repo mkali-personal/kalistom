@@ -81,6 +81,7 @@
       <label title="Rolling mean over this many 0.48 s frames">window <input id="win" type="number" min="1" max="200" step="1"></label>
       <label title="Start muting when the mean rises above this">on <input id="on" type="number" min="0" max="1" step="0.001"></label>
       <label title="Stop muting when the mean falls below this">off <input id="off" type="number" min="0" max="1" step="0.01"></label>
+      <label title="F / Shift+F jump to the next / previous place where the raw score is at least this high but no label says advertising - a break the labels may have missed">False negative threshold <input id="fnthr" type="number" min="0" max="1" step="0.01"></label>
       <span class="readout" id="pipe"></span>
     </div>
     <div id="wrap"><canvas id="cv"></canvas><div id="empty">Pick a recording on the left.</div></div>
@@ -88,7 +89,8 @@
       <kbd>Space</kbd> play/pause · <kbd>←</kbd><kbd>→</kbd> 5 s · <kbd>Shift</kbd> 10 s ·
       <kbd>Ctrl</kbd> 30 s · <kbd>[</kbd><kbd>]</kbd> previous/next label · <kbd>+</kbd><kbd>-</kbd>
       or <kbd>Ctrl</kbd>+wheel zoom · wheel pans · drag on the label track to create · drag edges to
-      resize · double-click to rename · <kbd>Del</kbd> delete · <kbd>Esc</kbd> deselect
+      resize · double-click to rename · <kbd>Del</kbd> delete · <kbd>Esc</kbd> deselect ·
+      <kbd>F</kbd> / <kbd>Shift</kbd>+<kbd>F</kbd> next/previous unlabelled high score
     </div>
   </main>
 </div>
@@ -215,7 +217,7 @@ function pipelineReadout() {
   const m = score.mute, ad = new Uint8Array(m.length);
   const delays = []; let missed = 0;
   for (const L of cur.labels) {
-    const a = Math.max(0, Math.ceil((L.s - CENTRE) / HOP)), b = Math.min(m.length, Math.floor((L.e - CENTRE) / HOP) + 1);
+    const a = Math.max(0, Math.ceil((L.s - CENTRE) / HOP)), b = Math.min(m.length, Math.ceil((L.e - CENTRE) / HOP));
     let first = -1;
     for (let k = a; k < b; k++) { ad[k] = 1; if (first < 0 && m[k]) first = k; }
     if (b > a) { if (first < 0) missed++; else delays.push((first - a) * HOP); }
@@ -230,6 +232,33 @@ function pipelineReadout() {
     ? `mutes ${(100 * hit / adN).toFixed(0)}% of labelled ads · ${(wrong * HOP).toFixed(0)} s of programme · ` +
       `median entry ${isNaN(med) ? "–" : med.toFixed(1) + " s"}` + (missed ? ` · ${missed} break(s) missed` : "")
     : `no labelled ads · ${(wrong * HOP).toFixed(0)} s of programme muted`;
+}
+
+// Walk the places where the classifier is confident of advertising but no label says so - the
+// labels' candidate false negatives. A place is a run of consecutive frames whose RAW score is at
+// or above the threshold and whose centre lies outside every label; jumping lands on the start
+// of the next (or previous) run, so holding the key walks them one by one.
+function jumpUnlabelled(dir) {
+  if (!score || !cur) { $("pipe").textContent = "no score for this recording"; return; }
+  // Scores are float32, so compare against the threshold in float32 too: otherwise a score of
+  // exactly 0.9 is stored as 0.8999999 and falls just short of a threshold typed as 0.9.
+  const shown = +$("fnthr").value, thr = Math.fround(shown), p = score.p, n = p.length;
+  const inLabel = new Uint8Array(n);
+  for (const L of cur.labels) {
+    const a = Math.max(0, Math.ceil((L.s - CENTRE) / HOP)), b = Math.min(n, Math.ceil((L.e - CENTRE) / HOP));
+    for (let k = a; k < b; k++) inLabel[k] = 1;
+  }
+  const hit = (k) => k >= 0 && k < n && p[k] >= thr && !inLabel[k];
+  const starts = [];
+  for (let k = 0; k < n; k++) if (hit(k) && !hit(k - 1)) starts.push(k);
+  if (!starts.length) { $("pipe").textContent = `nothing unlabelled scores ${shown} or more`; return; }
+  const t = au.currentTime, at = (k) => k * HOP;
+  const k = dir > 0 ? starts.find((s) => at(s) > t + 0.05) : [...starts].reverse().find((s) => at(s) < t - 0.05);
+  if (k === undefined) { $("pipe").textContent = `no more unlabelled scores ${shown} or more ${dir > 0 ? "after" : "before"} here`; return; }
+  let e = k; while (hit(e + 1)) e++;
+  au.currentTime = at(k); show(at(k)); sel = -1;
+  const i = starts.indexOf(k) + 1;
+  $("pipe").textContent = `unlabelled ${i} of ${starts.length}: ${fmt(at(k))}, ${((e - k + 1) * HOP).toFixed(1)} s at ≥ ${shown}`;
 }
 
 async function loadScoreSources(name) {
@@ -589,6 +618,8 @@ window.addEventListener("keydown", (ev) => {
     if (sel >= 0) { ev.preventDefault(); cur.labels.splice(sel, 1); sel = -1; dirty = true; }
   }
   else if (k === "a" || k === "A") addLabel();
+  else if (k === "f") jumpUnlabelled(1);
+  else if (k === "F") jumpUnlabelled(-1);
   else if (k === "Escape") sel = -1;
   else if (k === "Home") { au.currentTime = 0; view.t0 = 0; }
   else if (k === "End") { au.currentTime = cur.seconds; view.t0 = cur.seconds; clampView(); }
@@ -600,6 +631,8 @@ document.querySelectorAll("button").forEach((b) => b.addEventListener("mousedown
 $("save").onclick = save;
 $("filter").oninput = renderFiles;
 $("scoresrc").onchange = () => { $("scoresrc").blur(); loadScore(); };
+$("fnthr").value = store.get("fnthr", 0.9);
+$("fnthr").oninput = () => store.set("fnthr", +$("fnthr").value);
 for (const id of ["win", "on", "off"]) {
   $(id).oninput = () => {
     store.set("rule", { n: +$("win").value, on: +$("on").value, off: +$("off").value });
