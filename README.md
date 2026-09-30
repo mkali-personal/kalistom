@@ -85,6 +85,57 @@ tools/fetch_model.sh                           # YAMNet, 16 MB, into app/src/mai
 
 Labelling in Audacity: see [`docs/labelling.md`](docs/labelling.md).
 
+## Training the classifier
+
+There are two ways to train, and they produce the same kind of result file.
+
+**Locally, with nothing but numpy and scipy.** `trainer/train.py` is the reference: it builds
+the pool from every labelled recording, trains one model per held-out recording, and writes the
+out-of-fold predictions.
+
+```bash
+python trainer/train.py --dir captures/stitched --dir captures/sessions --head mlp \
+    --hidden 16 --save-oof captures/heads/oof_mlp16.npz --fold-cache captures/heads/folds_mlp16
+```
+
+It is slow on a laptop: 40 recordings take hours per head. `--fold-cache` saves each fold as it
+finishes, so a run that is interrupted resumes instead of starting over.
+
+**On a free Kaggle GPU, driven from this machine.** `trainer/torch_train.py` fits the same heads
+with PyTorch, and `trainer/kaggle_run.py` runs it on a Kaggle T4. A fold that takes minutes locally
+takes seconds there.
+
+```bash
+python trainer/kaggle_run.py --export --run "k40_lr head=lr l2=1e-3" \
+                                      --run "k40_mlp16 head=mlp hidden=16 wd=1e-2"
+```
+
+The driver works in four steps:
+
+1. It exports the pool with `train.py --export`, using the same labels, joins and folds.
+2. It uploads the pool as a private Kaggle dataset, and only when the pool has changed. The upload
+   is embeddings and labels, not audio.
+3. It pushes a private script and waits for it to finish.
+4. It copies the results into `captures/heads/`, where `smooth.py` and the label editor pick them
+   up.
+
+Kaggle needs a one-time setup:
+
+1. Create an account and verify a phone number, which Kaggle requires before it allows GPUs.
+2. Install the command-line tool with `pip install kaggle`.
+3. Create an API token under **Settings** and save it to `~/.kaggle/access_token`.
+
+`torch_train.py` also runs locally on the exported pool wherever PyTorch is installed, using the
+CPU if there is no GPU:
+
+```bash
+python trainer/torch_train.py captures/kaggle/dataset/pool.npz --head mlp --out oof.npz
+```
+
+The two implementations agree. On the same folds, the logistic regression matches `train.py`
+exactly (correlation 1.000). The network agrees as closely as two trainings of one network from
+different random starts can (correlation 0.96), because the two share no random-number generator.
+
 ## Recording a session
 
 ```bash

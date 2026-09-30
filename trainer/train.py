@@ -295,6 +295,9 @@ def main() -> int:
     ap.add_argument("--off", type=float, default=0.2, help="stop attenuating below this")
     ap.add_argument("--out", default="", help="write head weights here as JSON")
     ap.add_argument("--save-oof", default="", help="save out-of-fold predictions as .npz")
+    ap.add_argument("--export", default="", metavar="NPZ",
+                    help="build the pool exactly as for training - labels, joins, folds - write "
+                         "it to this .npz for torch_train.py (locally or on Kaggle), and stop")
     ap.add_argument("--fold-cache", default="",
                     help="save each fold's held-out predictions here as it finishes, and skip "
                          "folds already saved - so a run killed partway resumes instead of "
@@ -453,6 +456,18 @@ def main() -> int:
         n_folds = args.folds
         print(f"\nsplit: {n_folds}-fold by {args.block_seconds:.0f}s block within one recording")
     args.folds = n_folds
+
+    if args.export:
+        # Everything a trainer needs and nothing it has to re-derive: the base matrix, the labels,
+        # the fold of every row, and where each recording starts - so context never crosses a
+        # recording boundary on the other machine either. torch_train.py reads this file, locally
+        # or on a cloud GPU; this script remains the reference implementation.
+        np.savez(args.export, E=E_all.astype(np.float16), y=y, fold=np.asarray(fold, np.int32),
+                 groups=groups, names=np.array(names), rec_names=np.array(rec_names),
+                 rec_bounds=np.array(bounds), context=args.context,
+                 uses_rms=bool(rms is not None and len(rms) == len(emb)))
+        print(f"\nexported {len(y)} rows, {n_folds} folds -> {args.export}")
+        return 0
 
     # Out-of-fold predictions: every frame is scored by a model that never saw its recording.
     # Everything fitted to the data - the standardisation and the PCA basis as well as the
