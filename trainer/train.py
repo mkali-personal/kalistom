@@ -295,6 +295,11 @@ def main() -> int:
     ap.add_argument("--off", type=float, default=0.2, help="stop attenuating below this")
     ap.add_argument("--out", default="", help="write head weights here as JSON")
     ap.add_argument("--save-oof", default="", help="save out-of-fold predictions as .npz")
+    ap.add_argument("--final-only", action="store_true",
+                    help="skip the held-out folds and only fit the head to ship with --out, at "
+                         "the --on/--off chosen from an earlier measurement")
+    ap.add_argument("--smooth-frames", type=int, default=0,
+                    help="with --out: write a smoothing block for the phone (1 = none)")
     ap.add_argument("--export", default="", metavar="NPZ",
                     help="build the pool exactly as for training - labels, joins, folds - write "
                          "it to this .npz for torch_train.py (locally or on Kaggle), and stop")
@@ -493,7 +498,9 @@ def main() -> int:
             return context_mlp.predict(design, w, mu, sd)
         return predict(design, w, mu, sd)
 
-    for f in range(args.folds):
+    # --final-only skips the held-out folds: they measure a head, and this run is for shipping one
+    # whose measurement already exists (see captures/heads/ and smooth.py).
+    for f in ([] if args.final_only else range(args.folds)):
         tr = keep & (fold != f)
         te = fold == f
         held = names[f] if len(recs) > 1 else f"block fold {f}"
@@ -527,6 +534,11 @@ def main() -> int:
     w_full = train_head(keep, mu_full, sd_full)
     report(y, score(w_full, mu_full, sd_full), args.on, args.off,
            "FIT (trained on everything - memorisation)")
+    if args.final_only:
+        if not args.out:
+            print("--final-only without --out trains a head and throws it away")
+        return write_head(args, model_json(args, w_full, mu_full, sd_full, design), rms, emb,
+                          design, names, total_spans, None, None)
     split_name = ("leave-one-recording-out" if len(recs) > 1
                   else f"{args.folds}-fold by {args.block_seconds:.0f}s block")
     m = report(y, oof, args.on, args.off, f"HELD OUT, POOLED ({split_name})")
@@ -564,34 +576,47 @@ def main() -> int:
     else:
         print("  Held-out performance is not yet usable. More labelled breaks before more model.")
 
-    if args.out:
-        if args.head == "mlp":
-            model = {"type": "mlp", **context_mlp.export(w_full, mu_full, sd_full)}
-        else:
-            # Written in the stacked convention the phone will apply - one entry per input column,
-            # oldest frame first - even though training holds one set of statistics per base
-            # column and shares it across taps. Tiling here keeps the file a complete description
-            # of the model, so the device never has to know how it was fitted.
-            model = {"type": "logistic_regression",
-                     "mean": np.tile(mu_full, design.taps).tolist(),
-                     "scale": np.tile(sd_full, design.taps).tolist(),
-                     "weights": w_full[:-1].tolist(), "bias": float(w_full[-1])}
-        Path(args.out).write_text(json.dumps({
-            "type": model.pop("type"),
-            "context_frames": args.context,
-            "uses_rms": bool(rms is not None and len(rms) == len(emb)),
-            "input_dim": int(design.taps * design.d0),
-            **model,
-            # The swept point, not the argparse defaults. --on/--off only ever set what the
-            # per-fold reports were printed at; shipping them here would put thresholds in the
-            # file that nothing recommended and that no number above was measured with.
-            "on": float(best_point["on"]) if best_point else args.on,
-            "off": float(best_point["off"]) if best_point else args.off,
-            "operating_point": best_point,
-            "trained_on": {"recordings": names, "ad_breaks": n_breaks},
-            "held_out": m,
-        }, indent=1), encoding="utf-8")
-        print(f"\n-> {args.out}")
+    return write_head(args, model_json(args, w_full, mu_full, sd_full, design), rms, emb,
+                      design, names, n_breaks, best_point, m)
+
+
+def model_json(args, w_full, mu_full, sd_full, design) -> dict:
+    if args.head == "mlp":
+        return {"type": "mlp", **context_mlp.export(w_full, mu_full, sd_full)}
+    # Written in the stacked convention the phone will apply - one entry per input column, oldest
+    # frame first - even though training holds one set of statistics per base column and shares
+    # it across taps. Tiling here keeps the file a complete description of the model, so the
+    # device never has to know how it was fitted.
+    return {"type": "logistic_regression",
+            "mean": np.tile(mu_full, design.taps).tolist(),
+            "scale": np.tile(sd_full, design.taps).tolist(),
+            "weights": w_full[:-1].tolist(), "bias": float(w_full[-1])}
+
+
+def write_head(args, model, rms, emb, design, names, n_breaks, best_point, m) -> int:
+    if not args.out:
+        return 0
+    doc = {
+        "type": model.pop("type"),
+        "context_frames": args.context,
+        "uses_rms": bool(rms is not None and len(rms) == len(emb)),
+        "input_dim": int(design.taps * design.d0),
+        **model,
+        # The swept point when there is one, not the argparse defaults: --on/--off otherwise only
+        # set what the per-fold reports were printed at. With --final-only there is no sweep, and
+        # --on/--off are the operating point chosen from an earlier measurement.
+        "on": float(best_point["on"]) if best_point else args.on,
+        "off": float(best_point["off"]) if best_point else args.off,
+        "operating_point": best_point,
+        "trained_on": {"recordings": names, "ad_breaks": n_breaks},
+        "held_out": m,
+    }
+    if args.smooth_frames:
+        doc["smoothing"] = {"type": "rolling_mean" if args.smooth_frames > 1 else "none",
+                            "frames": args.smooth_frames,
+                            "seconds": round(args.smooth_frames * HOP_S, 2)}
+    Path(args.out).write_text(json.dumps(doc, indent=1), encoding="utf-8")
+    print(f"\n-> {args.out}")
     return 0
 
 

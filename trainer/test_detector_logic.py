@@ -7,6 +7,7 @@ every frame, so a slot or lag mistake is caught here rather than after an hour o
 
     python trainer/test_detector_logic.py
 """
+import json
 import sys
 from pathlib import Path
 
@@ -51,6 +52,70 @@ def main() -> int:
                 return 1
     print("OK - Detector.kt's ring arithmetic selects the same frames as stack_context")
     print("     (checked for context 1,2,3,10,11 x up to 100 frames, including before the ring fills)")
+    return check_mlp()
+
+
+def kotlin_mlp_scores(x: np.ndarray, cfg: dict) -> np.ndarray:
+    """Detector.kt's Mlp scorer, transliterated: the folded first layer (w1 / scale, and the
+    constant b1 - (w1 / scale) . mean), a ring of hidden vectors written at writeSlot, and the
+    same slot arithmetic as the linear head. Returns the sigmoid of each frame's logit."""
+    taps, hidden = int(cfg["context_frames"]), int(cfg["hidden"])
+    mean = np.asarray(cfg["mean"], np.float32)
+    scale = np.asarray(cfg["scale"], np.float32)
+    w1 = np.asarray(cfg["w1"], np.float32).reshape(hidden, -1)
+    w1s = w1 / scale[None, :]
+    c1 = np.asarray(cfg["b1"], np.float64) - (w1s.astype(np.float64) @ mean.astype(np.float64))
+    w2 = np.asarray(cfg["w2"], np.float32).reshape(taps, hidden)
+    ring = np.zeros((taps, hidden), np.float32)
+    frames_seen, write_slot = 0, 0
+    out = np.empty(len(x))
+    for k in range(len(x)):
+        s = c1 + w1s.astype(np.float64) @ x[k].astype(np.float64)
+        ring[write_slot] = np.maximum(s, 0.0).astype(np.float32)
+        write_slot = (write_slot + 1) % taps
+        frames_seen += 1
+        acc = float(cfg["b2"])
+        for tap in range(taps):
+            lag = taps - 1 - tap
+            slot = ((frames_seen - 1 - lag) % taps) if frames_seen > lag else 0
+            acc += float(w2[tap] @ ring[slot])
+        out[k] = 1.0 / (1.0 + np.exp(-max(min(acc, 30.0), -30.0)))
+    return out
+
+
+def check_mlp() -> int:
+    """The Kotlin mlp's arithmetic against parity_check.desktop_score, the desktop definition,
+    on the shipped head and a real session - or on random weights if those are not present."""
+    from parity_check import desktop_score
+    from train import load_embeddings, load_rms
+    root = Path(__file__).resolve().parent.parent
+    head = root / "app" / "src" / "main" / "assets" / "head_weights.json"
+    stem = root / "captures" / "sessions" / "sess_20260929_073233"
+    rng = np.random.default_rng(0)
+    cfg = json.loads(head.read_text(encoding="utf-8")) if head.exists() else {}
+    if cfg.get("type") != "mlp" or not stem.with_suffix(".f16").exists():
+        hidden, taps, d0 = 8, 10, 1025
+        cfg = {"type": "mlp", "context_frames": taps, "hidden": hidden,
+               "mean": rng.normal(size=d0).tolist(), "scale": (rng.random(d0) + 0.5).tolist(),
+               "w1": (rng.normal(size=hidden * d0) * 0.05).tolist(),
+               "b1": rng.normal(size=hidden).tolist(),
+               "w2": rng.normal(size=taps * hidden).tolist(), "b2": 0.1}
+        emb = rng.normal(size=(300, 1024)).astype(np.float32)
+        rms = rng.uniform(-50, -10, 300).astype(np.float32)
+        where = "random weights and frames"
+    else:
+        emb = load_embeddings(stem.with_suffix(".f16"))[:3000]
+        rms = load_rms(stem.with_suffix(".jsonl"))[:3000]
+        where = f"the shipped head on {stem.name}"
+    x = np.hstack([emb.astype(np.float32), ((rms[:, None] + 60.0) / 60.0).astype(np.float32)])
+    got = kotlin_mlp_scores(x, cfg)
+    want = desktop_score(emb, rms, cfg)
+    d = float(np.abs(got - want).max())
+    if d > 1e-4:
+        print(f"MISMATCH - the Kotlin mlp arithmetic differs from the desktop by {d:.2e} ({where})")
+        return 1
+    print(f"OK - Detector.kt's mlp arithmetic matches the desktop score to {d:.1e}")
+    print(f"     ({len(x)} frames, {where})")
     return 0
 
 

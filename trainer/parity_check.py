@@ -58,12 +58,21 @@ def desktop_score(emb: np.ndarray, rms: np.ndarray | None, cfg: dict) -> np.ndar
         x = np.hstack([x, ((rms[:, None] + 60.0) / 60.0).astype(np.float32)])
     else:
         x = np.hstack([x, np.zeros((len(x), 1), np.float32)])
-    s = stack_context(x, taps)
     mu = np.asarray(cfg["mean"], np.float32)
     sd = np.asarray(cfg["scale"], np.float32)
-    w = np.asarray(cfg["weights"], np.float32)
-    z = (s - mu) / sd
-    return 1.0 / (1.0 + np.exp(-np.clip(z @ w + float(cfg["bias"]), -30, 30)))
+    if cfg.get("type") == "mlp":
+        # Each frame's hidden vector first, then the context over those - context_mlp.predict's
+        # order, and the phone's. stack_context repeats frame 0's hidden vector at the start,
+        # which is the clamping the phone's ring does too.
+        hidden = int(cfg["hidden"])
+        w1 = np.asarray(cfg["w1"], np.float32).reshape(hidden, -1)
+        w2 = np.asarray(cfg["w2"], np.float32).reshape(taps, hidden)
+        h = np.maximum(((x - mu) / sd) @ w1.T + np.asarray(cfg["b1"], np.float32), 0.0)
+        logit = stack_context(h, taps) @ w2.ravel() + float(cfg["b2"])
+    else:
+        s = stack_context(x, taps)
+        logit = ((s - mu) / sd) @ np.asarray(cfg["weights"], np.float32) + float(cfg["bias"])
+    return 1.0 / (1.0 + np.exp(-np.clip(logit, -30, 30)))
 
 
 def main() -> int:

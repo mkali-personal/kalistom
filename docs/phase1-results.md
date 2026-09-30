@@ -520,3 +520,59 @@ is entry latency - muting typically starts 8-9 s into a break - which is exactly
 head improves. And with content loss at 7 s/h, below the 10 s/h budget, there is room to lower the
 thresholds: the user's own listening agrees that the app misses ads but essentially never mutes
 programme.
+
+## Forty recordings, three heads, and the first head change on the phone (2026-09-30)
+
+Seven phone sessions were added: 111 breaks in 23.0 h across 40 recordings, and the 07:00-11:00
+scoring window grew from 9.8 h to 15.1 h. Two of the new sessions turned out to have been played
+back two hours behind live; their news bulletins date them, and `.broadcast.json` now carries the
+time the audio actually went out.
+
+Training moved to a free Kaggle GPU (`trainer/kaggle_run.py`, see the README), where all 40 folds
+take minutes instead of most of a day. The logistic regression fitted there is the same model as
+the local one: correlation 1.0000 over all 172,400 frames.
+
+### Which head, at which budget
+
+Ad-seconds saved per hour on the morning hours (524 broadcast), best rule for each head:
+
+| content-seconds lost per hour, at most | 10 | 20 | 30 |
+|---|---|---|---|
+| logistic regression | 387 | 445 | 474 |
+| MLP, 16 units | 394 | **465** | 480 |
+| multiple-timescale pooling, 16 units | 416 | 462 | 485 |
+| multiple-timescale pooling, 32 units | **425** | 470 | **490** |
+
+The pooling head adds each frame's trailing means over about 5, 15 and 60 s. It has the best
+frame precision (90.6% against 83.1%) and wins clearly when false mutes must be rarest. At 20
+content-seconds an hour, the budget chosen, the three are within 5 ad-seconds of each other. On
+stretches of advertising never heard in another recording, pooling does worse: it misses one of
+six outright and covers 70-82% of the rest, against 94% for the MLP. It also trains in hours
+where the MLP takes minutes.
+
+### How much is memorisation
+
+`trainer/novelty.py` matches three-word phrases between breaks, using the transcripts. 77% of
+advertising frames are spots whose wording also airs in another recording's breaks. Recall there
+is 98%; on new wording it is 86-89%; every mostly-new stretch is still caught by the MLP. Matching
+the audio embeddings instead does not work: a repeated spot falls at a different offset against
+YAMNet's 0.48 s grid each time.
+
+### How good the labels are
+
+The first hand corrections, made in the label editor, cover five recordings and 23 breaks. The
+drafts found every break and invented none. Their errors are all at the edges, usually a break
+ended a few seconds early: recall 88-97%, precision 93-100% by time. The 10 September drafts
+score 88-94%; the one drafted this week from a full reading of its transcript scores 97.2%.
+
+### Shipped
+
+The phone now runs the 16-unit MLP, trained on all 40 recordings with the hand labels. It mutes
+when the score reaches 0.999 and releases below 0.2, with no averaging. On held-out audio that
+saves 465 ad-seconds an hour instead of 424, for 19 content-seconds instead of 17, and enters a
+break after a median of 2.9 s instead of 6.7.
+
+`Detector.kt` computes each frame's hidden vector once and keeps the last ten in a ring.
+`trainer/test_detector_logic.py` transliterates that arithmetic and matches the desktop score to
+3e-7 on a real session. `parity_check.py` now scores both head types, so the first session
+recorded with this build can confirm the phone agrees with the desktop.
