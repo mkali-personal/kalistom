@@ -416,6 +416,9 @@ def main() -> int:
         return 1
 
     keep = y != DROP
+    # Taken before same-broadcast folding renames `names` to one entry per fold: the out-of-fold
+    # file keeps both, so a reader can find one recording's rows without re-deriving them.
+    rec_names = list(names)
     if len(recs) > 1:
         from datetime import timedelta
         spans = []
@@ -514,7 +517,8 @@ def main() -> int:
     m = report(y, oof, args.on, args.off, f"HELD OUT, POOLED ({split_name})")
     best_point = sweep(y, oof, args.on - args.off)
     if args.save_oof:
-        np.savez(args.save_oof, y=y, p=oof, groups=groups, names=np.array(names))
+        np.savez(args.save_oof, y=y, p=oof, groups=groups, names=np.array(names),
+                 rec_names=np.array(rec_names), rec_bounds=np.array(bounds))
         print()
         print(f"out-of-fold predictions saved to {args.save_oof} - sweeping thresholds again")
         print("needs no refitting.")

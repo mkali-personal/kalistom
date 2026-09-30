@@ -47,6 +47,10 @@ CACHE = ROOT / "captures" / ".labelcache"
 # rather than imported so the editor starts without pulling in the training stack.
 LABEL_ORDER = (".truth.txt", ".gemini.txt", ".claude.txt", ".draft.txt")
 
+SCORE_GLOBS = ("*.npz", "heads/oof_*.npz")      # under captures/: train.py --save-oof output
+HEAD_WEIGHTS = ROOT / "app" / "src" / "main" / "assets" / "head_weights.json"
+EMBEDDING_BYTES = 1024 * 2                       # one float16 embedding row in a .f16
+
 SPEC_HOP = 0.05          # seconds per spectrogram column
 N_FFT = 1024
 N_MEL = 128              # before merging the low-frequency bins the FFT cannot resolve
@@ -137,6 +141,120 @@ def save_labels(name: str, labels: list[dict]) -> tuple[str, int]:
         out.with_name(out.name + ".bak").write_bytes(out.read_bytes())
     out.write_text("".join(f"{a:.3f}\t{b:.3f}\t{t}\n" for a, b, t in rows), encoding="utf-8")
     return out.name, len(rows)
+
+
+# ---------------------------------------------------------------- classifier scores
+
+def f16_frames(stem: str) -> int | None:
+    for d in GROUPS.values():
+        p = d / f"{stem}.f16"
+        if p.exists():
+            return p.stat().st_size // EMBEDDING_BYTES
+    return None
+
+
+def recording_slices(doc) -> dict[str, slice] | None:
+    """Which rows of a --save-oof file belong to which recording.
+
+    Newer files say so outright (rec_names, rec_bounds). Older ones store only a fold per row and
+    a name per fold, where a fold that held the same broadcast twice is named 'a + b'. The rows
+    are still recoverable exactly: train.py writes recordings in order, each has as many rows as
+    its .f16 has frames, and a merged fold lists its members in that same order - so each fold's
+    rows are cut up by its members' frame counts. If the counts do not add up, the file was made
+    from embeddings that have since changed, and None is returned rather than a guess.
+    """
+    if "rec_names" in doc.files:
+        return {str(n): slice(int(a), int(b))
+                for n, (a, b) in zip(doc["rec_names"], doc["rec_bounds"])}
+    groups, names = doc["groups"], doc["names"]
+    out: dict[str, slice] = {}
+    for g, name in enumerate(names):
+        rows = np.flatnonzero(groups == g)
+        at = 0
+        for member in str(name).split(" + "):
+            n = f16_frames(member)
+            if n is None:
+                return None
+            part = rows[at:at + n]
+            if len(part) != n or (n and part[-1] - part[0] != n - 1):
+                return None
+            out[member] = slice(int(part[0]), int(part[0]) + n) if n else slice(0, 0)
+            at += n
+        if at != len(rows):
+            return None
+    return out
+
+
+_score_lock = threading.Lock()
+_score_index: dict = {"stamp": None, "by_rec": {}}
+
+
+def score_index() -> dict[str, list[tuple[Path, slice]]]:
+    """recording stem -> [(oof file, its rows)], rebuilt whenever a file appears or changes."""
+    files = sorted(p for g in SCORE_GLOBS for p in (ROOT / "captures").glob(g))
+    stamp = tuple((str(p), p.stat().st_mtime) for p in files)
+    with _score_lock:
+        if _score_index["stamp"] != stamp:
+            by_rec: dict[str, list[tuple[Path, slice]]] = {}
+            for p in files:
+                try:
+                    with np.load(p, allow_pickle=True) as doc:
+                        sl = recording_slices(doc)
+                except (OSError, ValueError, KeyError):
+                    sl = None
+                if sl is None:
+                    print(f"  (skipping {p.name}: its rows no longer match the recordings)")
+                    continue
+                for rec, s in sl.items():
+                    by_rec.setdefault(rec, []).append((p, s))
+            _score_index.update(stamp=stamp, by_rec=by_rec)
+        return _score_index["by_rec"]
+
+
+def live_scores(stem: Path) -> np.ndarray | None:
+    """The phone's own raw score per frame, for sessions recorded since the head shipped."""
+    meta = stem.with_suffix(".jsonl")
+    if not meta.exists():
+        return None
+    vals = []
+    for line in meta.read_text(encoding="utf-8").splitlines():
+        if '"ad"' in line and '"rms"' in line:
+            vals.append(float(json.loads(line)["ad"]))
+    return np.array(vals, np.float32) if vals else None
+
+
+def score_sources(name: str) -> dict:
+    d, stem = resolve(name)
+    sources = [{"id": f"oof:{p.relative_to(ROOT / 'captures').as_posix()}",
+                "label": f"{p.stem} (held out)"}
+               for p, _ in score_index().get(stem.name, [])]
+    meta = stem.with_suffix(".jsonl")
+    if meta.exists() and '"ad"' in meta.read_text(encoding="utf-8")[:4000]:
+        sources.append({"id": "live", "label": "phone (live)"})
+    defaults = {"frames": 11, "on": 0.99, "off": 0.7}
+    try:
+        w = json.loads(HEAD_WEIGHTS.read_text(encoding="utf-8"))
+        defaults = {"frames": int((w.get("smoothing") or {}).get("frames", 1)),
+                    "on": float(w["on"]), "off": float(w["off"])}
+    except (OSError, ValueError, KeyError):
+        pass
+    return {"sources": sources, "defaults": defaults}
+
+
+def score_values(name: str, src: str) -> np.ndarray:
+    d, stem = resolve(name)
+    if src == "live":
+        p = live_scores(stem)
+        if p is None:
+            raise ValueError("no live scores in this session")
+        return p
+    if not src.startswith("oof:"):
+        raise ValueError(f"unknown source {src!r}")
+    for path, s in score_index().get(stem.name, []):
+        if src == f"oof:{path.relative_to(ROOT / 'captures').as_posix()}":
+            with np.load(path, allow_pickle=True) as doc:
+                return doc["p"][s].astype(np.float32)
+    raise ValueError(f"{src} has no rows for {stem.name}")
 
 
 # ---------------------------------------------------------------- spectrogram
@@ -241,6 +359,11 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(body, "application/octet-stream",
                            headers={"X-Cols": str(cols), "X-Bands": str(bands),
                                     "Access-Control-Expose-Headers": "X-Cols, X-Bands"})
+            elif u.path == "/api/scores":
+                self._json(score_sources(q["name"]))
+            elif u.path == "/api/score":
+                self._send(score_values(q["name"], q["src"]).tobytes(),
+                           "application/octet-stream")
             elif u.path == "/audio":
                 self._audio(resolve(q["name"])[1].with_suffix(".wav"))
             else:

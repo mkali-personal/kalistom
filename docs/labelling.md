@@ -49,6 +49,29 @@ draft was from the correction.
 
 Adding `?file=sessions/sess_X&t=400` to the page's address opens that recording at 400 s.
 
+**The classifier's score** appears between the spectrogram and the labels whenever there is one
+for the recording.
+
+- **Sources**, chosen from the Score menu:
+  - any held-out predictions saved by `train.py --save-oof` under `captures/` or
+    `captures/heads/`. Each frame there was scored by a model that never saw that recording.
+  - for phone sessions recorded since the head shipped, the phone's own live score.
+- **Reading it:**
+  - The grey line is the raw score and the blue line its rolling mean.
+  - The dashed lines are `on` and `off`.
+  - The red band is where the app would have muted.
+  - The vertical axis is log-odds, so 0.9, 0.99 and 0.999 are evenly spaced.
+- **Adjusting it:** the window, `on` and `off` start at the shipped values from
+  `head_weights.json`. Changing them redraws the band at once.
+- **The readout** beside them judges that rule against the labels as they currently stand. It
+  gives the share of labelled advertising muted, the seconds of programme muted, the median delay
+  into a break, and any breaks missed entirely.
+
+Two patterns deserve a second listen:
+
+- a label the score ignores throughout, which may be a labelling mistake;
+- a long stretch the score is sure of with no label under it, which may be a missed break.
+
 ### In Audacity
 
 1. Open the `.wav` in Audacity.

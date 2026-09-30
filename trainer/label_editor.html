@@ -44,6 +44,11 @@
     background: var(--bg); color: var(--ink); cursor: pointer; }
   #bar button:hover { border-color: var(--accent); }
   #title { font-weight: 600; }
+  #scorebar { display: flex; align-items: center; gap: 14px; padding: 5px 12px; border-bottom:
+    1px solid var(--line); background: var(--panel); flex-wrap: wrap; color: var(--muted); }
+  #scorebar select, #scorebar input { background: var(--bg); color: var(--ink);
+    border: 1px solid var(--line); border-radius: 5px; padding: 2px 4px; font: inherit; }
+  #scorebar input { width: 64px; }
   #dirty { width: 8px; height: 8px; border-radius: 50%; background: #d8891b; visibility: hidden; }
   .readout { color: var(--muted); font-variant-numeric: tabular-nums; }
   #wrap { flex: 1; position: relative; min-height: 0; }
@@ -70,6 +75,13 @@
       <span class="readout" id="clock"></span>
       <span class="readout" id="selinfo"></span>
       <span class="readout" id="zoom"></span>
+    </div>
+    <div id="scorebar">
+      <label>Score <select id="scoresrc"><option value="">none</option></select></label>
+      <label title="Rolling mean over this many 0.48 s frames">window <input id="win" type="number" min="1" max="200" step="1"></label>
+      <label title="Start muting when the mean rises above this">on <input id="on" type="number" min="0" max="1" step="0.001"></label>
+      <label title="Stop muting when the mean falls below this">off <input id="off" type="number" min="0" max="1" step="0.01"></label>
+      <span class="readout" id="pipe"></span>
     </div>
     <div id="wrap"><canvas id="cv"></canvas><div id="empty">Pick a recording on the left.</div></div>
     <div id="help">
@@ -98,6 +110,11 @@ let sel = -1, dirty = false;
 let spec = null;                        // {t0, t1, img: canvas}
 let specWant = "", specTimer = 0;
 let drag = null;
+// The classifier's per-frame score for this recording, and the mute rule applied to it:
+// {p, avg, mute}. Frame k covers k*HOP to k*HOP + 0.975 s (trainer/labels.py), so it is drawn
+// at its centre, k*HOP + CENTRE.
+let score = null;
+const HOP = 0.48, CENTRE = 0.4875;
 
 // ---------- colour map: dark blue -> teal -> yellow, one lookup per byte value
 const LUT = (() => {
@@ -122,8 +139,11 @@ function size() {
 }
 let box = size();
 const W = () => box.width, H = () => box.height;
-const specTop = () => RULER, specH = () => Math.max(H() - RULER - TRACK, 40);
-const trackTop = () => RULER + specH();
+const SCORE_H = 96;
+const scoreH = () => (score ? SCORE_H : 0);
+const specTop = () => RULER, specH = () => Math.max(H() - RULER - scoreH() - TRACK, 40);
+const scoreTop = () => RULER + specH();
+const trackTop = () => scoreTop() + scoreH();
 const x2t = (x) => view.t0 + (x / W()) * view.span;
 const t2x = (t) => ((t - view.t0) / view.span) * W();
 
@@ -168,6 +188,137 @@ function requestSpec() {
   }, 60);
 }
 
+// ---------- classifier score
+// The mute rule, ported from trainer/smooth.py: rolling() averages the raw score over the last n
+// frames (fewer at the start, as the phone does before its ring fills), and hysteresis() mutes
+// above `on` and releases below `off`. Recomputed in the page, so a threshold edit redraws at once.
+function applyRule() {
+  if (!score) return;
+  const n = Math.max(1, Math.round(+$("win").value || 1)), on = +$("on").value, off = +$("off").value;
+  const p = score.p, avg = new Float32Array(p.length), mute = new Uint8Array(p.length);
+  let sum = 0, state = false;
+  for (let i = 0; i < p.length; i++) {
+    sum += p[i];
+    if (i >= n) sum -= p[i - n];
+    avg[i] = sum / Math.min(i + 1, n);
+    state = state ? avg[i] >= off : avg[i] >= on;
+    mute[i] = state ? 1 : 0;
+  }
+  score.avg = avg; score.mute = mute; score.on = on; score.off = off;
+  pipelineReadout();
+}
+
+// What the rule does to THIS recording against its current labels: how much of the labelled
+// advertising it silences, how much programme it silences by mistake, and how late it gets in.
+function pipelineReadout() {
+  if (!score || !cur) { $("pipe").textContent = ""; return; }
+  const m = score.mute, ad = new Uint8Array(m.length);
+  const delays = []; let missed = 0;
+  for (const L of cur.labels) {
+    const a = Math.max(0, Math.ceil((L.s - CENTRE) / HOP)), b = Math.min(m.length, Math.floor((L.e - CENTRE) / HOP) + 1);
+    let first = -1;
+    for (let k = a; k < b; k++) { ad[k] = 1; if (first < 0 && m[k]) first = k; }
+    if (b > a) { if (first < 0) missed++; else delays.push((first - a) * HOP); }
+  }
+  let adN = 0, hit = 0, wrong = 0;
+  for (let k = 0; k < m.length; k++) {
+    if (ad[k]) { adN++; if (m[k]) hit++; } else if (m[k]) wrong++;
+  }
+  delays.sort((x, y) => x - y);
+  const med = delays.length ? delays[Math.floor(delays.length / 2)] : NaN;
+  $("pipe").textContent = adN
+    ? `mutes ${(100 * hit / adN).toFixed(0)}% of labelled ads · ${(wrong * HOP).toFixed(0)} s of programme · ` +
+      `median entry ${isNaN(med) ? "–" : med.toFixed(1) + " s"}` + (missed ? ` · ${missed} break(s) missed` : "")
+    : `no labelled ads · ${(wrong * HOP).toFixed(0)} s of programme muted`;
+}
+
+async function loadScoreSources(name) {
+  const sel = $("scoresrc");
+  sel.length = 1; score = null; $("pipe").textContent = "";
+  const doc = await (await fetch(`/api/scores?name=${encodeURIComponent(name)}`)).json();
+  if (!cur || cur.name !== name || doc.error) return;
+  for (const s of doc.sources) sel.add(new Option(s.label, s.id));
+  const d = doc.defaults, saved = store.get("rule", null);
+  $("win").value = saved ? saved.n : d.frames; $("on").value = saved ? saved.on : d.on; $("off").value = saved ? saved.off : d.off;
+  const want = store.get("scoresrc", null);
+  const pick = doc.sources.find((s) => s.id === want) || doc.sources[doc.sources.length - 1];
+  sel.value = pick ? pick.id : "";
+  await loadScore();
+}
+
+async function loadScore() {
+  const src = $("scoresrc").value, name = cur && cur.name;
+  if (!src || !name) { score = null; $("pipe").textContent = ""; return; }
+  store.set("scoresrc", src);
+  const r = await fetch(`/api/score?name=${encodeURIComponent(name)}&src=${encodeURIComponent(src)}`);
+  if (!r.ok || !cur || cur.name !== name) return;
+  score = { p: new Float32Array(await r.arrayBuffer()) };
+  applyRule();
+}
+
+// Log-odds, because the decision lives between 0.99 and 0.999, which a linear axis flattens
+// into one line at the top. The same choice as the live scope in the app (Scope.kt).
+const LO = Math.log(0.005 / 0.995), HI = Math.log(0.9995 / 0.0005);
+function scoreY(p) {
+  const q = Math.min(Math.max(p, 0.005), 0.9995), z = Math.log(q / (1 - q));
+  return scoreTop() + 6 + (1 - (z - LO) / (HI - LO)) * (SCORE_H - 12);
+}
+
+function drawScore(col) {
+  const w = W(), top = scoreTop();
+  ctx.fillStyle = col("--panel"); ctx.fillRect(0, top, w, SCORE_H);
+  if (!score.avg) return;
+  const n = score.p.length;
+  const k0 = Math.max(0, Math.floor((view.t0 - CENTRE) / HOP)), k1 = Math.min(n - 1, Math.ceil((view.t0 + view.span - CENTRE) / HOP));
+  // gridlines
+  ctx.font = "10px system-ui, sans-serif"; ctx.textBaseline = "middle";
+  for (const g of [0.01, 0.5, 0.9, 0.99, 0.999]) {
+    const y = Math.round(scoreY(g)) + 0.5;
+    ctx.strokeStyle = col("--line"); ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w, y); ctx.stroke();
+    ctx.fillStyle = col("--muted"); ctx.fillText(String(g), 3, y - 6);
+  }
+  // mute band, one rectangle per run of muted frames
+  ctx.fillStyle = "rgba(220, 60, 60, 0.22)";
+  for (let k = k0; k <= k1; k++) {
+    if (!score.mute[k]) continue;
+    let e = k; while (e + 1 <= k1 && score.mute[e + 1]) e++;
+    const xa = t2x(k * HOP + CENTRE - HOP / 2), xb = t2x(e * HOP + CENTRE + HOP / 2);
+    ctx.fillRect(xa, top, xb - xa, SCORE_H);
+    ctx.fillRect(xa, trackTop(), xb - xa, 5);                             // echoed on the label track
+    k = e;
+  }
+  // thresholds
+  ctx.setLineDash([5, 4]); ctx.strokeStyle = "#d33";
+  for (const th of [score.on, score.off]) {
+    const y = Math.round(scoreY(th)) + 0.5;
+    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w, y); ctx.stroke();
+  }
+  ctx.setLineDash([]);
+  // Raw score thin and grey, the rolling mean the rule actually thresholds thick. When several
+  // frames share a pixel column, the raw line keeps its extremes so a lone spike stays visible.
+  const line = (arr, colr, width, extremes) => {
+    ctx.strokeStyle = colr; ctx.lineWidth = width; ctx.beginPath();
+    const per = (k1 - k0 + 1) / Math.max(w, 1);
+    if (per <= 2) {
+      for (let k = k0; k <= k1; k++) {
+        const x = t2x(k * HOP + CENTRE), y = scoreY(arr[k]);
+        k === k0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+      }
+    } else {
+      for (let c = 0; c < w; c++) {
+        const a = k0 + Math.floor(c * per), b = Math.min(k1, k0 + Math.floor((c + 1) * per) - 1);
+        let lo = 1, hi = 0, s = 0;
+        for (let k = a; k <= b; k++) { lo = Math.min(lo, arr[k]); hi = Math.max(hi, arr[k]); s += arr[k]; }
+        if (extremes) { ctx.moveTo(c + 0.5, scoreY(lo)); ctx.lineTo(c + 0.5, scoreY(hi)); }
+        else { const y = scoreY(s / (b - a + 1)); c === 0 ? ctx.moveTo(c, y) : ctx.lineTo(c, y); }
+      }
+    }
+    ctx.stroke(); ctx.lineWidth = 1;
+  };
+  line(score.p, col("--muted"), 1, true);
+  line(score.avg, col("--accent"), 2, false);
+}
+
 // ---------- drawing
 function draw() {
   const w = W(), h = H(), css = getComputedStyle(document.documentElement);
@@ -181,6 +332,7 @@ function draw() {
     ctx.imageSmoothingEnabled = view.span < 120;
     ctx.drawImage(spec.img, x0, specTop(), x1 - x0, specH());
   }
+  if (score) drawScore(col);
   // ruler
   ctx.fillStyle = col("--panel"); ctx.fillRect(0, 0, w, RULER);
   const steps = [1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 900, 1800];
@@ -229,7 +381,11 @@ function readouts() {
   const L = cur && cur.labels[sel];
   $("selinfo").textContent = L ? `selected ${fmt(L.s)} – ${fmt(L.e)} (${(L.e - L.s).toFixed(1)} s)` : "";
   $("zoom").textContent = cur ? `view ${view.span < 120 ? view.span.toFixed(0) + " s" : (view.span / 60).toFixed(1) + " min"}` : "";
+  // The readout judges the rule against the labels as they are NOW, so it follows every edit.
+  const sig = cur ? cur.labels.map((x) => x.s.toFixed(2) + "-" + x.e.toFixed(2)).join() : "";
+  if (sig !== labelSig) { labelSig = sig; pipelineReadout(); }
 }
+let labelSig = "";
 
 function frame() {
   if (cur && !au.paused) {                                              // keep the playhead on screen
@@ -286,6 +442,7 @@ async function openFile(name) {
   au.currentTime = v ? v.t : 0;
   store.set("last", name);
   renderFiles();
+  loadScoreSources(name);
 }
 
 async function save() {
@@ -442,6 +599,13 @@ $("add").onclick = addLabel;
 document.querySelectorAll("button").forEach((b) => b.addEventListener("mousedown", (e) => e.preventDefault()));
 $("save").onclick = save;
 $("filter").oninput = renderFiles;
+$("scoresrc").onchange = () => { $("scoresrc").blur(); loadScore(); };
+for (const id of ["win", "on", "off"]) {
+  $(id).oninput = () => {
+    store.set("rule", { n: +$("win").value, on: +$("on").value, off: +$("off").value });
+    applyRule();
+  };
+}
 window.addEventListener("resize", () => { box = size(); specWant = ""; });
 
 loadFiles();
