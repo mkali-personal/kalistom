@@ -110,6 +110,17 @@ def parse_run(spec: str) -> dict:
     return out
 
 
+def pool_fingerprint(path: Path) -> str:
+    """Same as torch_train.pool_fingerprint, which runs on Kaggle and checks the mounted pool
+    against this value."""
+    import numpy as np
+    d = np.load(path, allow_pickle=True)
+    h = hashlib.sha1()
+    for k in ("y", "fold"):
+        h.update(np.ascontiguousarray(d[k]).tobytes())
+    return h.hexdigest()[:16]
+
+
 def write_kernel(user: str, runs: list[dict], max_folds: int) -> None:
     """torch_train.py, verbatim up to its entry point, plus a runner for these configurations."""
     src = (ROOT / "trainer" / "torch_train.py").read_text(encoding="utf-8")
@@ -119,6 +130,7 @@ def write_kernel(user: str, runs: list[dict], max_folds: int) -> None:
 import glob as _glob
 _POOL = _glob.glob("/kaggle/input/**/pool.npz", recursive=True)[0]
 _RUNS = {json.dumps(runs)}
+_EXPECT = "{pool_fingerprint(POOL)}"
 _summaries = {{}}
 for _r in _RUNS:
     _r = dict(_r)
@@ -126,7 +138,7 @@ for _r in _RUNS:
     _head = _r.pop("head")
     print("=" * 80, flush=True)
     _summaries[_name] = run(_POOL, _head, f"/kaggle/working/{{_name}}.npz", "auto", {max_folds},
-                            log=lambda *a: print(*a, flush=True), **_r)
+                            log=lambda *a: print(*a, flush=True), expect_pool=_EXPECT, **_r)
 with open("/kaggle/working/summary.json", "w") as _f:
     json.dump(_summaries, _f, indent=1)
 '''
@@ -203,8 +215,19 @@ def main() -> int:
     user = username()
     upload_pool(user)
     write_kernel(user, runs, args.max_folds)
-    print(kaggle("kernels", "push", "-p", str(KERNEL_DIR)).strip())
-    out = wait_and_fetch(user, runs, args.poll)
+    # A freshly uploaded dataset can be "ready" while new jobs still mount the previous version.
+    # The job refuses a pool that is not the one just exported, and is pushed again a little later.
+    for attempt in range(1, 7):
+        print(kaggle("kernels", "push", "-p", str(KERNEL_DIR)).strip())
+        try:
+            out = wait_and_fetch(user, runs, args.poll)
+            break
+        except SystemExit as e:
+            if "STALE POOL" not in str(e) or attempt == 6:
+                raise
+            print(f"Kaggle mounted the previous pool - pushing again in 2 minutes "
+                  f"(attempt {attempt + 1} of 6)", flush=True)
+            time.sleep(120)
     print_summary(out)
     return 0
 

@@ -10,7 +10,8 @@
 # proof the phone processed exactly the file we think it did.
 #
 #   tools/process_desktop.sh push [dir]   copy WAVs to the phone's inbox (default captures/desktop)
-#   tools/process_desktop.sh pull [dir]   fetch .f16/.jsonl back beside those WAVs
+#   tools/process_desktop.sh pull [dir]   fetch .f16/.jsonl back beside those WAVs, then delete them
+#                                         from the phone
 #   tools/process_desktop.sh status       what is waiting and what is done
 #
 # Between push and pull, tap "Process inbox" in the app. It needs the model loaded, so start a
@@ -62,7 +63,18 @@ case "${1:-status}" in
       moved=0
       for f in "$tmp"/*; do
         [ -e "$f" ] || continue
-        mv -f "$f" "$DIR/" && moved=$(( moved + 1 ))
+        base=$(basename "$f")
+        # The phone keeps nothing it has handed over: once a file is here at the size the phone
+        # reports, its copy there is deleted.
+        remote_size=$("$ADB" shell stat -c %s "$REMOTE_OUT/$base" 2>/dev/null | tr -d '\r')
+        if mv -f "$f" "$DIR/"; then
+          moved=$(( moved + 1 ))
+          if [ "$remote_size" = "$(stat -c %s "$DIR/$base")" ]; then
+            "$ADB" shell rm -f "$REMOTE_OUT/$base" >/dev/null 2>&1
+          else
+            echo "  kept on phone (size differs): $base"
+          fi
+        fi
       done
       rmdir "$tmp" 2>/dev/null
       echo "$moved file(s) -> $DIR"
@@ -82,6 +94,6 @@ case "${1:-status}" in
     ;;
 
   *)
-    sed -n '2,18p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+    sed -n '2,19p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
     ;;
 esac

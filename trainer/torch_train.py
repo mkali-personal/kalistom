@@ -218,12 +218,26 @@ DEFAULTS = {"lr": {"l2": 1e-3, "iters": 3000},
 
 # ---------------------------------------------------------------- running a pool
 
+def pool_fingerprint(d) -> str:
+    """Identifies a pool by its labels and folds. kaggle_run.py computes the same thing locally
+    (kept identical by hand, because importing this file there would need torch)."""
+    import hashlib
+    h = hashlib.sha1()
+    for k in ("y", "fold"):
+        h.update(np.ascontiguousarray(d[k]).tobytes())
+    return h.hexdigest()[:16]
+
+
 def run(pool: str, head: str, out: str, device: str = "auto", max_folds: int = 0,
-        log=print, **params) -> dict:
+        log=print, expect_pool: str = "", **params) -> dict:
     dev = torch.device("cuda" if device == "auto" and torch.cuda.is_available()
                        else ("cpu" if device == "auto" else device))
     cfg = {**DEFAULTS[head], **{k: v for k, v in params.items() if v is not None}}
     d = np.load(pool, allow_pickle=True)
+    if expect_pool and pool_fingerprint(d) != expect_pool:
+        # Kaggle can mount the previous version of a dataset that was re-uploaded moments ago.
+        # Training on it would quietly report on the old data under the new run's name.
+        raise RuntimeError(f"STALE POOL: mounted {pool_fingerprint(d)}, expected {expect_pool}")
     y_np, fold = d["y"].astype(np.int8), d["fold"]
     n, taps = len(y_np), int(d["context"])
     idx = torch.as_tensor(context_index(d["rec_bounds"], taps, n), device=dev)
@@ -231,7 +245,8 @@ def run(pool: str, head: str, out: str, device: str = "auto", max_folds: int = 0
     y = torch.as_tensor((y_np == POSITIVE).astype(np.float32), device=dev)
     keep = torch.as_tensor(y_np != DROP, device=dev)
     fold_t = torch.as_tensor(fold, device=dev)
-    folds = sorted(set(int(f) for f in fold))
+    # A fold below zero is training-only (train.py --test-newest-hours): never held out.
+    folds = sorted(set(int(f) for f in fold if f >= 0))
     if max_folds:
         folds = folds[:max_folds]
     log(f"{head} {json.dumps(cfg)} on {dev}"
@@ -256,7 +271,9 @@ def run(pool: str, head: str, out: str, device: str = "auto", max_folds: int = 0
         oof[te_np] = p[te].float().cpu().numpy()
         scored |= te_np
         del Z, rows
-        name = str(d["names"][f]) if f < len(d["names"]) else f"fold {f}"
+        # Pools exported before day folds have no fold_names; there each fold was one group.
+        fnames = d["fold_names"] if "fold_names" in d.files else d["names"]
+        name = str(fnames[f]) if f < len(fnames) else f"fold {f}"
         log(f"  held out {name} [{time.time() - t0:.0f}s, {how}]")
 
     k = (y_np != DROP) & scored                   # judged on the folds actually run
@@ -268,7 +285,8 @@ def run(pool: str, head: str, out: str, device: str = "auto", max_folds: int = 0
     log(f"POOLED  precision {100 * summary['precision']:.1f}%  recall "
         f"{100 * summary['recall']:.1f}%  in {summary['seconds']:.0f}s")
     np.savez(out, y=y_np, p=oof, groups=d["groups"], names=d["names"],
-             rec_names=d["rec_names"], rec_bounds=d["rec_bounds"],
+             rec_names=d["rec_names"], rec_bounds=d["rec_bounds"], fold=fold,
+             fold_names=d["fold_names"] if "fold_names" in d.files else d["names"],
              params=json.dumps(summary))
     return summary
 

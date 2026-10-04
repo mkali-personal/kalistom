@@ -57,7 +57,11 @@ class RecorderService : Service() {
         /** Sessions shorter than this are not worth keeping. */
         private const val MIN_SESSION_SEC = 10.0
 
-        /** Delete oldest sessions beyond this budget. ~115 MB/hour of WAV. */
+        /**
+         * Delete oldest sessions beyond this budget. ~115 MB/hour of WAV. Pulling a session
+         * (trainer/ingest.py --pull) deletes it from the phone, so this is only a backstop for
+         * sessions that have not been pulled yet.
+         */
         private const val STORAGE_BUDGET_BYTES = 6L * 1024 * 1024 * 1024
 
         @Volatile var isRunning = false; private set

@@ -7,6 +7,125 @@ Design review, issues and full roadmap: see the plan at
 `~/.claude/plans/in-android-app-for-starry-lampson.md`, derived from
 `Android App for Commercial Detection.pdf`.
 
+## Everyday commands
+
+Everything below is typed in a terminal opened in the project folder. In Command Prompt that is:
+
+```
+cd C:\Users\michaeka\git-projects\ads-filter
+```
+
+The commands are the same in Command Prompt and in Git Bash. The only exception is the `tools/*.sh`
+scripts, which need Git Bash. Each script also prints its own help when run with `--help`, for
+example `python trainer/update.py --help`.
+
+### Label recordings
+
+```
+python trainer/label_editor.py
+```
+
+This opens the label editor in your browser at http://localhost:8765/. Pick a recording from the
+list, correct the ad spans, and save. It writes your labels next to the audio as
+`<recording>.truth.txt`, and training always prefers those over machine drafts. The editor keeps
+running until you press Ctrl+C in the terminal. If it says the port is in use, an editor is already
+running; open the address above, or start a second one with `--port 9000`.
+
+### After recording: pull, retrain, and put the new head on the phone
+
+Plug the phone in, stop any recording in the app, and run:
+
+```
+python trainer/update.py --ship
+```
+
+This runs the whole loop:
+
+1. It copies new sessions from the phone and deletes them there once they have arrived intact.
+2. It lists recordings that still have no labels. Those are left out until you label them, so a
+   good habit is to label first and then run this.
+3. It trains twice on this machine. The first model is trained without the newest two hours or so
+   and tested on them, which tells you how the head does on audio it has not heard. The second is
+   trained on everything and is the one that goes to the phone.
+4. It prints the test result next to every earlier run, so you can see whether things improved.
+5. It rebuilds the app with the new head and installs it. The thresholds on the phone stay as they
+   were.
+
+Without `--ship`, steps 1 to 4 run and nothing on the phone changes; the last line tells you how to
+install the new head later. Other useful variations:
+
+| Command | What it does |
+|---|---|
+| `python trainer/update.py --no-pull` | Use what is already on the computer; do not touch the phone |
+| `python trainer/update.py --no-train` | Only print the report from the last run again |
+| `python trainer/update.py --full` | The careful test: every broadcast day held out in turn, on a free Kaggle GPU. Use it before changing thresholds or trying a different kind of head |
+| `python trainer/update.py --full --backend local` | The same, on this machine, which is much slower |
+
+The quick test in step 3 covers only a couple of hours, so its numbers jump around from run to run.
+It is good for catching a model that has broken; it is not good enough for choosing thresholds.
+
+### Change the thresholds
+
+The head gives every 0.48 s of audio a score between 0 and 1. The phone starts muting when the
+score reaches the **on** threshold (now 0.999) and stops muting when it falls below the **off**
+threshold (now 0.2). To change one, for example the on threshold to 0.99:
+
+```
+python trainer/ship.py --on 0.99
+```
+
+This edits `app/src/main/assets/head_weights.json`, rebuilds the app and installs it. It refuses
+to install while the phone is recording, because installing ends the session. Use `--off 0.3` for
+the other threshold, or give both. Every change saves the previous file under
+`captures/heads/shipped/`, and the command prints how to undo it, which looks like this:
+
+```
+python trainer/ship.py --restore captures/heads/shipped/head_weights_<date>_<time>.json
+```
+
+What a change buys, measured on held-out days for the 07:00-11:00 programme (seconds per hour of
+listening, with off at 0.2):
+
+| on | Ad seconds muted | Programme seconds muted by mistake | Delay before muting starts |
+|---|---|---|---|
+| 0.9999 | 392 | 14 | 6.2 s |
+| **0.999 (now)** | **448** | **23** | **2.9 s** |
+| 0.995 | 472 | 30 | 1.9 s |
+| 0.99 | 478 | 35 | 1.4 s |
+| 0.95 | 489 | 47 | 0.5 s |
+
+To see the full trade as a picture, draw the ROC curves; `--show` opens the plot in a window:
+
+```
+python trainer/roc_threshold.py captures/heads/oof_day_mlp16.npz --dir captures/stitched --dir captures/sessions --hours 07-11 --show
+```
+
+After changing the thresholds, `python trainer/update.py --no-train --full` reprints the last
+careful test judged at the new values.
+
+### Other commands worth keeping nearby
+
+| Command | What it does |
+|---|---|
+| `python trainer/ship.py` | Rebuild the app and install it, changing nothing |
+| `python trainer/ship.py --head captures/heads/head_mlp16.json` | Install a head trained earlier, keeping the phone's thresholds |
+| `python trainer/ingest.py --pull` | Only copy sessions off the phone, and check them |
+| `python trainer/ingest.py --pull --keep-on-phone` | Copy without deleting them from the phone |
+| `python trainer/repair_wav.py captures/sessions/*.wav` | Fix recordings whose length shows as 0, from a session the app did not close. Healthy files are skipped |
+| `%LOCALAPPDATA%\Android\Sdk\platform-tools\adb.exe devices` | Check that the computer sees the phone (Command Prompt). It should list one device |
+| `tools/record_stream.sh --at 07:00 4` | Record the radio stream on this computer from 07:00 to 11:00 (Git Bash). See "Setting up on another computer" |
+
+Where things are kept:
+
+| Path | What is there |
+|---|---|
+| `captures/sessions/` | Recordings pulled from the phone, and their labels |
+| `captures/stitched/` | Recordings of the stream made on a computer, and their labels |
+| `captures/heads/history.jsonl` | One line per training run, the source of the history table |
+| `captures/heads/head_mlp16.json` | The newest trained head, before it is shipped |
+| `captures/heads/shipped/` | Every head file the phone had before a change, for undoing |
+| `app/src/main/assets/head_weights.json` | What the phone runs: the head and its thresholds |
+
 ## Where the project stands
 
 Findings: [`docs/phase0-results.md`](docs/phase0-results.md), [`docs/phase1-results.md`](docs/phase1-results.md).
@@ -87,7 +206,21 @@ Labelling in Audacity: see [`docs/labelling.md`](docs/labelling.md).
 
 ## Training the classifier
 
-There are two ways to train, and they produce the same kind of result file.
+The everyday loop is `python trainer/update.py`, described under "Everyday commands" above. This
+section explains what it does underneath.
+
+**Folds are broadcast days, not recordings.** The same advertisement airs many times in one
+morning, so with one recording held out, its ads were usually in training an hour earlier, from
+another recording. Holding out a whole day (04:00 to 04:00) removes those repeats. `update.py
+--full` holds out every day in turn; with `--fold-cache` a new recording retrains only its own day.
+`train.py --fold-by recording` restores the old split. Numbers from different splits are not
+comparable, so compare heads only on the same split.
+
+**The quick split** (`train.py --test-newest-hours 2`, the default in `update.py`) holds out only
+the newest days, trains once on the rest and once on everything. It keeps `--on`/`--off` exactly
+as given rather than sweeping them, because a sweep on two hours of audio would chase noise.
+
+The steps below still work on their own. There are two ways to train, and they produce the same kind of result file.
 
 **Locally, with nothing but numpy and scipy.** `trainer/train.py` is the reference: it builds
 the pool from every labelled recording, trains one model per held-out recording, and writes the
@@ -142,6 +275,11 @@ different random starts can (correlation 0.96), because the two share no random-
 tools/fetch_model.sh                              # once, downloads YAMNet (16 MB)
 python trainer/ingest.py --pull --verify-alignment # pull + prove alignment
 ```
+
+Pulling moves the sessions rather than copying them. Live inference never reads old sessions, so
+once a session is on the computer it is deleted from the phone. A session is deleted only after
+every one of its files hashes the same on both sides, and the session still being recorded is
+copied but left in place until a later pull. Add `--keep-on-phone` to copy without deleting.
 
 On the phone: start playback, open **ads-filter**, tap **Start recording**, grant the projection
 prompt. A session opens when audio starts and closes 30 s after it stops. **Mark** drops a timestamped

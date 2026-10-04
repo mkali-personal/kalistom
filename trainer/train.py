@@ -30,6 +30,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import time
 from pathlib import Path
@@ -44,6 +45,7 @@ from rectime import describe, in_hours, parse_window, started_at
 EMBEDDING_DIM = 1024
 BASE_DIM = EMBEDDING_DIM + 1        # the embedding plus the per-frame loudness column
 MIN_SAME_BROADCAST_S = 30.0   # shorter than this is two recordings abutting, not one broadcast
+DAY_TURNS_AT_H = 4            # broadcast days run 04:00 to 04:00, so a night stays in one fold
 
 
 def load_embeddings(path: Path) -> np.ndarray:
@@ -139,6 +141,68 @@ def overlap_groups(recs, spans) -> list[int]:
                 parent[find(i)] = find(j)
     roots = {}
     return [roots.setdefault(find(i), len(roots)) for i in range(n)]
+
+
+def broadcast_day(mid) -> str:
+    """The broadcast day a recording belongs to, from its midpoint, with the day turning at 04:00.
+
+    The cut is at 04:00 rather than midnight so that a night's listening stays in one fold: a
+    recording from 23:52 to 00:23 belongs to the evening before, not to the morning after.
+    """
+    from datetime import timedelta
+    return (mid - timedelta(hours=DAY_TURNS_AT_H)).strftime("%Y-%m-%d")
+
+
+def newest_days_fold(fold, fold_names, members, hours: float):
+    """Collapses day folds into one: the newest days, enough of them to reach `hours`, become fold
+    0 and everything else becomes -1, trained on and never scored.
+
+    Newest rather than random because that is how the app is used: trained on the past, run on
+    what comes next. It is the most honest single test there is, and it is also the question you
+    have after recording - how does the model do on the audio that just came in?
+    """
+    dated = [k for k, d in enumerate(fold_names) if not d.startswith("undated")]
+    chosen, total = [], 0.0
+    for k in sorted(dated, key=lambda k: fold_names[k], reverse=True):
+        if total >= hours:
+            break
+        chosen.append(k)
+        total += sum(m[1] for m in members[k]) * HOP_S / 3600
+    if len(chosen) == len(dated):
+        raise SystemExit(f"holding out {hours} h would leave nothing to train on")
+    new_fold = np.where(np.isin(fold, chosen), 0, -1).astype(np.int32)
+    name = " + ".join(sorted(fold_names[k] for k in chosen))
+    return new_fold, [name], [[m for k in sorted(chosen) for m in members[k]]]
+
+
+def day_folds(recs, grp: list[int], names: list[str]) -> tuple[np.ndarray, list[str]]:
+    """One fold per broadcast day, with each same-broadcast group kept whole.
+
+    Leave-one-recording-out is honest about the audio but not about the advertising. The same spot
+    airs again and again through a morning, so a held-out recording's ads were usually heard in
+    training an hour earlier, from a different recording, and the held-out score partly measures
+    recognising a repeat. Holding out a whole day removes the same-day repeats. Spots that run for
+    weeks still recur across days, which no split short of time-ordered evaluation can remove.
+
+    It also makes adding data cheap. A new recording joins one day's fold, so only that day's
+    held-out predictions have to be recomputed (see --fold-cache), where leave-one-recording-out
+    adds a fold per recording and grows without limit.
+
+    A group takes the day of its first member, so a same-broadcast pair never straddles two folds.
+    A recording with no timestamp gets a fold of its own, named after it.
+    Returns the fold of each group, and each fold's name.
+    """
+    day_of_group: dict[int, str] = {}
+    for i, (_, embp, _, _) in enumerate(recs):
+        if grp[i] in day_of_group:
+            continue
+        t = started_at(embp)
+        day_of_group[grp[i]] = (broadcast_day(frame_mid(t, embp)) if t is not None
+                                else f"undated {names[i]}")
+    fold_names = sorted(set(day_of_group.values()))
+    index = {d: k for k, d in enumerate(fold_names)}
+    n_groups = max(grp) + 1
+    return np.array([index[day_of_group[g]] for g in range(n_groups)]), fold_names
 
 
 def frame_mid(start, emb_path: Path):
@@ -289,7 +353,16 @@ def main() -> int:
     ap.add_argument("--epochs", type=int, default=8, help="mlp: fixed, never early-stopped")
     ap.add_argument("--l2", type=float, default=1e-3)
     ap.add_argument("--iters", type=int, default=3000)
-    ap.add_argument("--folds", type=int, default=5)
+    ap.add_argument("--folds", type=int, default=5,
+                    help="single recording only: how many folds of contiguous blocks")
+    ap.add_argument("--test-newest-hours", type=float, default=0.0, metavar="H",
+                    help="quick split: hold out only the newest broadcast days, enough to reach H "
+                         "hours, and train once on the rest. Thresholds are not swept; --on/--off "
+                         "go into --out unchanged")
+    ap.add_argument("--fold-by", choices=("day", "recording"), default="day",
+                    help="several recordings: hold out a broadcast day at a time (default), or "
+                         "one recording at a time as before. Same-broadcast recordings are "
+                         "always held out together")
     ap.add_argument("--block-seconds", type=float, default=30.0)
     ap.add_argument("--on", type=float, default=0.6, help="start attenuating above this")
     ap.add_argument("--off", type=float, default=0.2, help="stop attenuating below this")
@@ -449,16 +522,45 @@ def main() -> int:
             # The fold count follows the groups, not the recordings. Without this the loop runs
             # one fold per recording while `names` has one per group, and walks off the end.
             n_groups = len(merged)
-    if len(recs) > 1:
+    if len(recs) > 1 and args.fold_by == "day":
+        # Hold out whole broadcast days - see day_folds for why a recording is not enough.
+        fold_of_group, fold_names = day_folds(recs, grp, rec_names)
+        fold = fold_of_group[groups]
+        n_folds = len(fold_names)
+        # A fold's members, by recording, with their frame counts: the fingerprint that decides
+        # whether a cached fold is still the same fold.
+        members = [[(rec_names[i], int(b - a)) for i, (a, b) in enumerate(bounds)
+                    if fold_of_group[grp[i]] == k] for k in range(n_folds)]
+        split_name = f"leave-one-day-out, {n_folds} days"
+        print(f"\nsplit: {split_name}")
+        for k, d in enumerate(fold_names):
+            print(f"  {d}: {len(members[k])} recording(s), "
+                  f"{sum(m[1] for m in members[k]) * HOP_S / 3600:.1f} h")
+        if args.test_newest_hours:
+            fold, fold_names, members = newest_days_fold(fold, fold_names, members,
+                                                         args.test_newest_hours)
+            n_folds = 1
+            split_name = f"newest days held out ({fold_names[0]})"
+            print(f"\nquick split: test on {fold_names[0]}, "
+                  f"{sum(m[1] for m in members[0]) * HOP_S / 3600:.1f} h; train on the rest")
+    elif args.test_newest_hours:
+        print("--test-newest-hours needs several recordings and --fold-by day")
+        return 1
+    elif len(recs) > 1:
         # Hold out whole recordings. Blocks within one recording still share the same ad break,
         # the same presenters and the same hour of broadcast; only a different recording tests
         # whether anything was learnt beyond that.
         fold = groups
         n_folds = n_groups
-        print(f"\nsplit: leave-one-recording-out ({n_folds} folds)")
+        fold_names, members = list(names), None
+        split_name = "leave-one-recording-out"
+        print(f"\nsplit: {split_name} ({n_folds} folds)")
     else:
         fold = blocks(len(y), max(int(args.block_seconds / HOP_S), 1), args.folds)
         n_folds = args.folds
+        fold_names = [f"block fold {f}" for f in range(n_folds)]
+        members = None
+        split_name = f"{args.folds}-fold by {args.block_seconds:.0f}s block"
         print(f"\nsplit: {n_folds}-fold by {args.block_seconds:.0f}s block within one recording")
     args.folds = n_folds
 
@@ -469,7 +571,8 @@ def main() -> int:
         # or on a cloud GPU; this script remains the reference implementation.
         np.savez(args.export, E=E_all.astype(np.float16), y=y, fold=np.asarray(fold, np.int32),
                  groups=groups, names=np.array(names), rec_names=np.array(rec_names),
-                 rec_bounds=np.array(bounds), context=args.context,
+                 fold_names=np.array(fold_names), rec_bounds=np.array(bounds),
+                 context=args.context,
                  uses_rms=bool(rms is not None and len(rms) == len(emb)))
         print(f"\nexported {len(y)} rows, {n_folds} folds -> {args.export}")
         return 0
@@ -503,7 +606,7 @@ def main() -> int:
     for f in ([] if args.final_only else range(args.folds)):
         tr = keep & (fold != f)
         te = fold == f
-        held = names[f] if len(recs) > 1 else f"block fold {f}"
+        held = fold_names[f]
         if (y[tr] == POSITIVE).sum() == 0 or (y[tr] == 0).sum() == 0:
             print(f"  {held}: one class missing in training - skipped")
             oof[te] = 0.0
@@ -512,6 +615,12 @@ def main() -> int:
         # work - so each fold is written the moment it finishes and reused if it is there.
         cached = (Path(args.fold_cache) / f"{held.replace(' + ', '+').replace(' ', '_')}.npy"
                   if args.fold_cache else None)
+        if cached and members is not None:
+            # A day's fold is reused only while it holds the same recordings. Adding one changes
+            # the fingerprint and that day alone is retrained; the other days' predictions stay
+            # honest, because their models never saw their own day, only one recording less.
+            fp = hashlib.sha1(json.dumps(members[f]).encode()).hexdigest()[:10]
+            cached = cached.with_name(f"{cached.stem}_{fp}.npy")
         if cached and cached.exists():
             saved = np.load(cached)
             if len(saved) == int(te.sum()):
@@ -539,20 +648,28 @@ def main() -> int:
             print("--final-only without --out trains a head and throws it away")
         return write_head(args, model_json(args, w_full, mu_full, sd_full, design), rms, emb,
                           design, names, total_spans, None, None)
-    split_name = ("leave-one-recording-out" if len(recs) > 1
-                  else f"{args.folds}-fold by {args.block_seconds:.0f}s block")
-    m = report(y, oof, args.on, args.off, f"HELD OUT, POOLED ({split_name})")
-    best_point = sweep(y, oof, args.on - args.off)
+    # Rows in a fold below zero were only ever trained on (the quick split); they have no score.
+    scored = np.asarray(fold) >= 0
+    m = report(y[scored], oof[scored], args.on, args.off, f"HELD OUT, POOLED ({split_name})")
+    # A threshold sweep on a few hours of test audio would chase noise, and write_head would then
+    # ship whatever it found. The quick split keeps --on/--off exactly as given.
+    best_point = None if args.test_newest_hours else sweep(y, oof, args.on - args.off)
     if args.save_oof:
         np.savez(args.save_oof, y=y, p=oof, groups=groups, names=np.array(names),
-                 rec_names=np.array(rec_names), rec_bounds=np.array(bounds))
+                 rec_names=np.array(rec_names), rec_bounds=np.array(bounds),
+                 fold=np.asarray(fold, np.int32), fold_names=np.array(fold_names),
+                 scored=scored)
         print()
         print(f"out-of-fold predictions saved to {args.save_oof} - sweeping thresholds again")
         print("needs no refitting.")
 
     n_breaks = total_spans
     print("\nVERDICT")
-    if n_breaks < 3:
+    if args.test_newest_hours:
+        print(f"  Quick check only: {scored.sum() * HOP_S / 3600:.1f} h of test audio is enough to")
+        print("  catch a broken model, not to tune thresholds or to choose between heads. Use")
+        print("  the full day folds (update.py --full) for those.")
+    elif n_breaks < 3:
         print(f"  Only {n_breaks} ad break(s) in this data. Every fold's test half contains part")
         print("  of the same break the model trained on, so the held-out numbers above are")
         print("  optimistic by an unknown amount. This run shows the pipeline works end to end;")

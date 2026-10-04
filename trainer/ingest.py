@@ -13,12 +13,14 @@ verify, and distinguishes a fixed offset (recoverable) from a growing one (dropp
 Usage:
     python trainer/ingest.py                     # verify ./captures/sessions
     python trainer/ingest.py --dir some/dir
-    python trainer/ingest.py --pull              # adb pull from the phone first
+    python trainer/ingest.py --pull              # adb pull from the phone first, then delete there
+    python trainer/ingest.py --pull --keep-on-phone   # pull without deleting
     python trainer/ingest.py --verify-alignment  # prove embeddings line up with the audio
 """
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import subprocess
@@ -67,8 +69,53 @@ def adb() -> str:
     return str(cand) if cand.exists() else "adb"
 
 
-def pull(dest: Path) -> None:
+def remote_hashes() -> dict[str, str]:
+    """md5 of every file in the phone's session directory, keyed by file name."""
+    r = subprocess.run([adb(), "shell", f"cd {REMOTE_DIR} 2>/dev/null && md5sum * 2>/dev/null"],
+                       capture_output=True, text=True)
+    out = {}
+    for line in r.stdout.splitlines():
+        parts = line.strip().split(None, 1)
+        if len(parts) == 2:
+            out[parts[1].strip()] = parts[0]
+    return out
+
+
+def local_md5(path: Path) -> str:
+    h = hashlib.md5()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def is_closed(meta: Path) -> bool:
+    """True once the writer has appended its "end" record, which it does last, on close."""
+    try:
+        lines = meta.read_text(encoding="utf-8").strip().splitlines()
+        return bool(lines) and json.loads(lines[-1]).get("type") == "end"
+    except (OSError, ValueError):
+        return False
+
+
+def pull(dest: Path, keep_on_phone: bool = False) -> None:
+    """Copies the phone's sessions here, then deletes from the phone every one that arrived intact.
+
+    The phone is not an archive: live inference never reads old sessions, so a session that is
+    safely on this machine is only taking space there. A session is deleted from the phone only
+    when two things hold. First, every one of its files must hash the same here as on the phone,
+    so nothing is removed on the strength of a truncated or interrupted copy. Second, it must be
+    finished. Only one session is ever open at a time and it is always the newest, so every older
+    one is finished, and the newest is finished once its .jsonl ends with the "end" record. The
+    open session is still copied, so the partial copy is usable, and it is deleted on a later pull.
+    """
     dest.parent.mkdir(parents=True, exist_ok=True)
+    # Hash first and pull second: a file still being written then fails the comparison rather than
+    # passing it, because the copy holds more bytes than were hashed.
+    before = remote_hashes()
+    if not before:
+        print(f"nothing on the phone in {REMOTE_DIR}")
+        return
     print(f"pulling {REMOTE_DIR} -> {dest}")
     # adb.exe is a Windows binary: give it a native destination path.
     win_dest = str(dest.parent.resolve())
@@ -78,6 +125,29 @@ def pull(dest: Path) -> None:
     if r.returncode != 0:
         sys.stderr.write(r.stderr)
         raise SystemExit("adb pull failed")
+    if keep_on_phone:
+        return
+
+    stems = sorted({Path(f).stem for f in before})
+    newest = stems[-1]
+    removed = 0
+    for stem in stems:
+        files = sorted(f for f in before if Path(f).stem == stem)
+        if stem == newest and not is_closed(dest / f"{stem}.jsonl"):
+            print(f"  kept on phone: {stem} is still being recorded")
+            continue
+        bad = [f for f in files
+               if not (dest / f).exists() or local_md5(dest / f) != before[f]]
+        if bad:
+            print(f"  kept on phone: {stem}, because {', '.join(bad)} did not copy intact")
+            continue
+        rm = subprocess.run([adb(), "shell", "rm", "-f"] + [f"{REMOTE_DIR}/{f}" for f in files],
+                            capture_output=True, text=True)
+        if rm.returncode != 0:
+            print(f"  could not delete {stem} from the phone: {rm.stderr.strip()}")
+            continue
+        removed += 1
+    print(f"deleted {removed} pulled session(s) from the phone")
 
 
 def read_wav(path: Path) -> tuple[np.ndarray, int]:
@@ -237,12 +307,15 @@ def alignment_test(s: Session) -> bool:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--dir", type=Path, default=DEFAULT_LOCAL)
-    ap.add_argument("--pull", action="store_true", help="adb pull sessions first")
+    ap.add_argument("--pull", action="store_true",
+                    help="adb pull sessions first, deleting from the phone those that copied intact")
+    ap.add_argument("--keep-on-phone", action="store_true",
+                    help="with --pull, leave the sessions on the phone as well")
     ap.add_argument("--verify-alignment", action="store_true", help="recompute frame rms from the wav and compare")
     args = ap.parse_args()
 
     if args.pull:
-        pull(args.dir)
+        pull(args.dir, keep_on_phone=args.keep_on_phone)
 
     d = args.dir
     if not d.exists():

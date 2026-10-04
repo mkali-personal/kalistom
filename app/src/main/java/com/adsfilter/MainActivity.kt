@@ -106,8 +106,11 @@ class MainActivity : Activity() {
         root.addView(label("ACTIVITY", 11f, p.muted, bold = true).apply {
             letterSpacing = 0.12f
         }, marginTop(22f))
+        // A floor height plus weight: in split screen the page is taller than the window, the
+        // panel keeps its floor and the whole page scrolls; on a full screen the outer ScrollView
+        // fills the viewport and the weight hands the panel whatever room is left.
         root.addView(activityPanel(), LinearLayout.LayoutParams(
-            LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f
+            LinearLayout.LayoutParams.MATCH_PARENT, dp(220f), 1f
         ).apply { topMargin = dp(6f) })
 
         root.addView(label(
@@ -116,7 +119,12 @@ class MainActivity : Activity() {
             11f, p.muted
         ), marginTop(12f))
 
-        setContentView(root)
+        // Scrollable as a whole, so nothing is cut off when the app gets half the screen.
+        setContentView(ScrollView(this).apply {
+            isFillViewport = true
+            setBackgroundColor(p.bg)
+            addView(root)
+        })
 
         // The scope animates independently of the log: frames arrive about twice a second and
         // the trail fades continuously, so it wants a steady repaint rather than an event.
@@ -232,6 +240,9 @@ class MainActivity : Activity() {
             background = roundedRect(p.surface, dp(14f), dp(1f), p.border)
             setPadding(dp(14f), dp(12f), dp(14f), dp(12f))
             clipToOutline = true
+            // The log scrolls inside the page's own ScrollView; this lets a fling that reaches
+            // the end of the log carry on into the page instead of stopping dead.
+            isNestedScrollingEnabled = true
         }
         return scroll
     }
@@ -324,7 +335,7 @@ class MainActivity : Activity() {
         val dir = File(getExternalFilesDir(null), "sessions")
         val wavs = dir.listFiles { f -> f.name.endsWith(".wav") }?.sortedBy { it.name }
         if (wavs.isNullOrEmpty()) {
-            append("no sessions yet")
+            append("no sessions on the phone - pulled sessions are deleted from it")
             return
         }
         append("--- ${wavs.size} session(s) ---")

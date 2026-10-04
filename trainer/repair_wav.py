@@ -18,6 +18,7 @@ Usage:
 """
 from __future__ import annotations
 
+import glob
 import shutil
 import struct
 import sys
@@ -90,7 +91,9 @@ def repair(path: Path, backup: bool) -> bool:
 
 
 def main() -> int:
-    args = [a for a in sys.argv[1:] if a != "--no-backup"]
+    # Command Prompt passes *.wav through unexpanded, where a Unix shell would expand it.
+    args = [m for a in sys.argv[1:] if a != "--no-backup"
+            for m in (sorted(glob.glob(a)) if any(c in a for c in "*?[") else [a])]
     backup = "--no-backup" not in sys.argv
     if not args:
         print(__doc__)
